@@ -14,7 +14,7 @@
 # options
 # backupcheck - disabled accounts only
 # ./cpanelbackup backupcheck (exit after disk check)
-# diskcheck - all
+# diskcheck all - all
 # uploadtest - only run upload test
 
 #VARIABLES
@@ -22,25 +22,27 @@
 #export DELETEDATE=2016-11-20;
 #export NOSLASHLIMIT=1;
 
+
 #todo
 # add replace getdiskspace with cached lookup
 # run that cachedspace lookup once in a while. Automatically editing backup enabled / disabled in /var/cpanel/users/username
 # * check age of cpanel backup process
 #
-# check inodes
-# check /tmp for being full
-#
-# add legacy inremental
 
-# make mail function
-#echo "test" | /bin/mail -s "subject" "john@interserver.net" -- -f sysadmin@trouble-free.net <-- c5
-#echo "test" | /bin/mail -r sysadmin@interserver.net -s "subject" "john@interserver.net" < -- c6
 
-MYVERSION='03.22.2017';
+MYVERSION='01.17.2018';
+
+/admin/upscripts
+
+if [ "$1" = "diskcheck" ]; then
+	# this variable checks for cpbackup running
+	NOBACKUPCHECK=1;
+fi
+
 
 #config
 #must have mailx installed
-MAILTO=`/admin/getcontact`;
+MAILTO=`grep ^CONTACTEMAIL /etc/wwwacct.conf | cut -d" " -f2`;
 # with out backups
 # disk space in mb
 MBLIMIT=12000;
@@ -63,28 +65,12 @@ else
         HOSTNAME=`/bin/hostname`;
 fi
 
-if [ "$HOSTNAME" = "fold.interserver.net" ]; then
-	PKGTMP='/backup'
-	echo "Set PKGTMP to non default $PKGTMP";
-else
-	PKGTMP='/home/cpbackuptmp';
-fi
+PKGTMP='/home/cpbackuptmp';
 
 export HOME=/root
 
-if [ ! -e /opt/curl/bin/curl ]; then
-	# not centos7
-	if [ ! `cat /etc/redhat-release  | awk '{print $4}' | cut -d. -f1` = "7" ]; then
-        	dir=`pwd`;
-        	cd /admin/ports
-        	./install curl
-        	cd $dir
-	fi
-fi
-
-
 date='/bin/date';
-FROM='sysadmin@trouble-free.net';
+FROM='root@${hostname}';
 if [ "$1" = "backupcheck" -o "$1" = "diskcheck" ]; then
 	export RUN_BY_CRON=0;
 else
@@ -143,11 +129,6 @@ fi
 
 # check for disk space over 95%
 SLASHLIMIT=95;
-if [ ! "$HOSTNAME" = "fold.interserver.net" ]; then
-	SLASHLIMIT=98;
-else
-	SLASHLIMIT=95;
-fi
 
 if [ "$NOSLASHLIMIT" = "1" ]; then
 	if [ `df -m | grep /$ | awk '{print $5}' | cut -d% -f1` -gt "$SLASHLIMIT" ]; then
@@ -163,7 +144,6 @@ if [ -f /root/.swift/_skipdisk ]; then
 	echo 'Skipping disk space checks'
 fi
 
-/admin/upscripts
 
 LOGFILE=/root/tmp/swift/log-$logextension;
 
@@ -234,6 +214,7 @@ if [ "$ok" = "0" ]; then
 			fi
 		else
 			echo "Upload test works on number ${uploadnumbertimes}" 2>&1 | tee -a $LOGFILE
+			break
 		fi
 	done
 fi
@@ -334,11 +315,13 @@ function checkuploaddebug()
 
 function checkupload()
 {
-	echo "checking $1 md5 with $2 $3 " 2>&1 | tee -a $LOGFILE
+	#codeblock 1
+	#checkupload $file cpmove-$user-$cpaneldate.tar.gz
+	echo "checking $1 md5 with $2 $3 in function checkupload at line $LINENO" 2>&1 | tee -a $LOGFILE
 	#/admin/swift/rsync webhosting1700.interserver.net /backup/2015-03-25/accounts/mp311com.tar.gz --check cpmove-mp311com-2015-03-26.tar.gz
 	#/admin/swift/rsync $HOSTNAME $1 --check $2
 	# give swift some time after upload
-	sleep 20s;
+	sleep 2s;
 	if [ "$3" = "24" ]; then
 		check_upload=`/admin/swift/rsync $HOSTNAME $1 --check $2 24 2>/dev/null| egrep "No match found|do not match"`;
 	else
@@ -349,8 +332,18 @@ function checkupload()
 
 	if [ "$check_upload" = "" ]; then
 		uploadcheck=1;
+		echo "Backup ok";
 	else
 		uploadcheck=0;
+		echo "no backup found"
+	fi
+
+	if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ] ; then
+		echo "Running backup";
+		# tty to debug but only with out cron
+		#/admin/swift/rsync $HOSTNAME $1 --put $2 > /dev/tty 2>&1 | tee -a $LOGFILE
+		echo "Running /admin/swift/rsync $HOSTNAME $1 --put $2" | tee -a $LOGFILE
+		/admin/swift/rsync $HOSTNAME $1 --put $2 | tee -a $LOGFILE
 	fi
 
 }
@@ -512,13 +505,25 @@ run_backup()
 
                 echo "Date extension is $cpaneldate" 2>&1 | tee -a $LOGFILE
                 checkupload $file cpmove-$user-$cpaneldate.tar.gz
-		echo "	DEBUG: checkupload returned: $check_upload at line $LINENO" 2>&1 | tee -a $LOGFILE
+		#echo "	DEBUG: checkupload returned: $check_upload at line $LINENO" 2>&1 | tee -a $LOGFILE
 		echo
 
-		# codeblock1 move to function
                 if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ] ; then
-                        /admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
-			sleep 5s;
+			#echo "user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO time 1" 2>&1 | tee -a $LOGFILE
+			for uploadnumbertimes in 1 2 3 4 5 6 7 8 9 10; do
+				checkupload $file cpmove-$user-$cpaneldate.tar.gz
+				if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ] ; then
+					# commenting out this, it appears to have no reason to run again, it will loop back and check. Running here will do the upload and not check
+					#checkupload $file cpmove-$user-$cpaneldate.tar.gz
+					/admin/swift/isrmsplit $HOSTNAME $file cpmove-$user-$cpaneldate.tar.gz
+					echo "RUN NUMBER $uploadnumbertimes user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
+					sleep ${uploadnumbertimes}m
+				else
+					echo "SUCCESS RUN NUMBER $uploadnumbertimes user ${cyan}$user${normal} md5sum matches $LINENO" 2>&1 | tee -a $LOGFILE
+					break;
+				fi
+			done
+
 			echo "Sending deleteafter $DELETEAFTER days for ${green}$user${normal} upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
                         /admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
 			sleep 5s;
@@ -539,39 +544,19 @@ run_backup()
                 checkupload $file cpmove-$user-$cpaneldate.tar.gz 24
                 if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
                         echo "md5sum does not match for ${cyan}$user${normal}, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
-			echo "  DEBUG: checkupload returned: $check_upload";
+			echo "  DEBUG: checkupload returned: $check_upload at line $LINENO" 2>&1 | tee -a $LOGFILE
 			echo 'Hold on here, lets double check this';
 			sleep 2s;
 			if [ -f /root/.swift/.auth_key ]; then
 				/bin/rm -v /root/.swift/.auth_key
 			fi
 			if [ `checkupload $file cpmove-$user-$cpaneldate.tar.gz 24` = "0" ]; then
-				checkuploaddebug $file cpmove-$user-$cpaneldate.tar.gz
+				checkuploaddebug "${file}" "cpmove-${user}-${cpaneldate}.tar.gz"
                         	echo "$user backup failed md5check. $uploadcheck at $LINENO (check2) Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup run failed md5" $MAILTO $MAILARGS2
 				COUNTFAILURE=`expr $COUNTFAILURE + 1`
 				echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
 				echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
 				echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
-
-				# retry, reusing codeblock1 (move to function)
-				echo "Retrying failed upload of cpmove-$user-$cpaneldate.tar.gz (second run)" 2>&1 | tee -a $LOGFILE
-				sleep 1m;
-				/admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
-	                        sleep 5s;
-        	                echo "Sending deleteafter $DELETEAFTER days for ${green}$user${normal} upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
-                	        /admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
-                        	sleep 5s;
-
-				checkupload $file cpmove-$user-$cpaneldate.tar.gz 24
-
-				if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
-					echo "Second run of cpmove-$user-$cpaneldate.tar.gz also failed" | tee -a $LOGFILE
-					RETRYFAILURE=`expr $RETRYFAILURE + 1`
-				else
-					echo "Second run of cpmove-$user-$cpaneldate.tar.gz was a success" | tee -a $LOGFILE
-					echo "Second run of cpmove-$user-$cpaneldate.tar.gz was a succes Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup second run success" $MAILTO $MAILARGS2
-					RETRYSUCCESS=`expr $RETRYSUCCESS + 1`
-				fi
 
 				
 				echo "Total accounts retried backed up successful $RETRYSUCCESS" 2>&1 | tee -a $LOGFILE
@@ -641,14 +626,11 @@ function getinodes()
 # check size
 function getdiskspace()
 {
-	# multi partitons
-	#diskusage=`quota -u $1 | grep /dev | awk '{print $2}'`;
-	# blank theese out
 	space='';
 	diskusage='';
 	diskusagefloat='';
-
-	space=`quota -u $1 | grep /dev | awk '{print $2}' | tr -d "*" | tr '\n' '+'`;
+	
+	space=`quota -w -u $1 | grep /dev | awk '{print $2}' | tr -d "*" | tr '\n' '+'`;
 	# openvz with out quota will return blank
 	if [ ! "$space" = "" ]; then
 		diskusagefloat=`echo "(${space%?})/1024" | bc -l`;
@@ -694,16 +676,16 @@ if [ ! "$NOBACKUPCHECK" = "1" ]; then
 	mystart=0;
 	while ps axg | grep -v grep | grep -E "/usr/local/cpanel/bin/backup|/usr/local/cpanel/scripts/cpbackup|/usr/local/cpanel//bin/backup|/usr/local/cpanel//scripts/cpbackup" > /dev/null; do
 		waitdate=`date`; 
-		if [ "$mystart" = "300" ]; then
-			echo '300 checks starting backup in 10 minutes' 2>&1 | tee -a $LOGFILE
+		if [ "$mystart" = "600" ]; then
+			echo '600 checks starting backup in 10 minutes' 2>&1 | tee -a $LOGFILE
 			backup_date_check=`ps auxw | grep -v grep | grep -E "/usr/local/cpanel/bin/backup|/usr/local/cpanel/scripts/cpbackup|/usr/local/cpanel//bin/backup|/usr/local/cpanel//scripts/cpbackup"  | awk '{print $9 " " $10}'`;
 			echo "check for hung backup processes on $HOSTNAME Line $LINENO - ps shows a date of $backup_date_check" | /bin/mail $MAILARGS -s "$HOSTNAME timed out waiting for cpanel backup" $MAILTO $MAILARGS2
 			sleep 10m;
 			break;
 		fi
 		mystart=`expr $mystart + 1`
-		echo "sleeping 1 minute while backup process finishes at $waitdate times $mystart" 2>&1 | tee -a $LOGFILE
-		sleep 1m
+		echo "sleeping 5 minutes while backup process finishes at $waitdate times $mystart" 2>&1 | tee -a $LOGFILE
+		sleep 5m
 		done
 else
 	echo 'Skipping checking for cpanel backups due to NOBACKUPCHECK' 2>&1 | tee -a $LOGFILE
@@ -787,7 +769,7 @@ fi
 echo "BACKUP CHECK: ENDING" 2>&1 | tee -a $LOGFILE
 echo "" 2>&1 | tee -a $LOGFILE
 
-if [ "$1" = "backupcheck" ]; then
+if [ "$1" = "backupcheck" -o "$1" = "diskcheck" ]; then
 	echo "Exiting on only backup check";
 	exit;
 fi
@@ -796,7 +778,7 @@ fi
 
 # NEW backup here
 BACKUP_CHECK=`cat /var/cpanel/backups/config | grep BACKUPENABLE: | cut -d\' -f2`;
-if [ "$BACKUP_CHECK" = "yes" ]; then
+if [ "$BACKUP_CHECK" = "yes" -o "$BACKUP_CHECK" = "BACKUPENABLE: yes" ]; then
 	echo 'cPanel backups are enabled';
 	BACKUPDIR=`cat /var/cpanel/backups/config | grep ^BACKUPDIR: | awk '{print $2}'`;
 	if [ "$BACKUPDIR" = "" ]; then
@@ -823,16 +805,70 @@ if [ "$BACKUP_CHECK" = "yes" ]; then
 			BTIME='';
 		elif [ -d $BACKUPDIR/monthly/incremental/accounts ]; then
 			BTIME=monthly;
+		# 11.64 added in date functions
+		elif [ -d $BACKUPDIR/weekly ]; then
+			echo "Searching $BACKUPDIR/weekly" 2>&1 | tee -a $LOGFILE
+			cd $BACKUPDIR/weekly
+			latest_dir_check=$(ls -td -- */ | head -n 1);
+			if [ -d $BACKUPDIR/weekly/$latest_dir_check/accounts ]; then
+				SEARCHBDIR=0;
+				USERBACKUPDIR="$BACKUPDIR/weekly/$latest_dir_check/accounts";
+                                echo "Using $BACKUPDIR location $USERBACKUPDIR" 2>&1 | tee -a $LOGFILE
+				SEARCHBDIR=1;
+			else
+				for findbackupdir in *; do
+					SEARCHBDIR=0;
+					if [ -d $findbackupdir/accounts ]; then
+						USERBACKUPDIR="$BACKUPDIR/weekly/$findbackupdir/accounts";
+						echo "Using $BACKUPDIR location $USERBACKUPDIR" 2>&1 | tee -a $LOGFILE
+						SEARCHBDIR=1;
+						continue
+					fi
+				done
+			fi
+ 
+			if [ "$SEARCHBDIR" = "0" ]; then
+				# fallback
+				#/backup/2017-05-31/accounts
+				USERBACKUPDIR=$(find $BACKUPDIR -maxdepth 2 | grep /accounts$ | head -n 1);
+				if [ "$USERBACKUPDIR" = "" ]; then
+					echo 'Did not find incremental daily weekly or monthly in new 11.64 search' 2>&1 | tee -a $LOGFILE
+					echo "Did not find incremental daily weekly or monthly at $LINENO in new 11.64 search but non legacy backup type incrementalwas selected with version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME incremental backup not found" $MAILTO $MAILARGS2
+					exit;
+				else
+					if [ ! -d "$USERBACKUPDIR" ]; then
+						echo "$USERBACKUPDIR in fallback at line $LINENO is not a directory" 2>&1 | tee -a $LOGFILE
+						exit;
+					fi
+				fi
+			fi
+			
 		else
-			echo 'Did not find incremental daily weekly or monthly' 2>&1 | tee -a $LOGFILE
-			echo "Did not find incremental daily weekly or monthly at $LINENO but non legacy backup type incremental was selected with version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME incremental backup not found" $MAILTO $MAILARGS2
-			exit;
+			# fallback
+                        #/backup/2017-05-31/accounts
+			USERBACKUPDIR=$(find $BACKUPDIR -maxdepth 2 | grep /accounts$ | head -n 1);
+			 if [ "$USERBACKUPDIR" = "" ]; then
+				echo 'Did not find incremental daily weekly or monthly' 2>&1 | tee -a $LOGFILE
+				echo "Did not find incremental daily weekly or monthly at $LINENO but non legacy backup type incremental was selected with version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME incremental backup not found" $MAILTO $MAILARGS2
+				exit;
+			else
+				if [ ! -d "$USERBACKUPDIR" ]; then
+                                        echo "$USERBACKUPDIR in fallback at line $LINENO is not a directory" 2>&1 | tee -a $LOGFILE
+                                	exit;
+                                fi
+				SEARCHBDIR=1;
+			fi
 		fi
 
 		echo "TIME period: $BTIME (if blank daily)" 2>&1 | tee -a $LOGFILE
-		cd $BACKUPDIR/$BTIME/incremental/accounts
+		if [ "$SEARCHBDIR" = "1" ]; then
+			cd $USERBACKUPDIR
+		else
+			USERBACKUPDIR=$BACKUPDIR/$BTIME/incremental/accounts;
+			cd $USERBACKUPDIR
+		fi
 		for dir in *; do 
-			cd $BACKUPDIR/$BTIME/incremental/accounts
+			cd $USERBACKUPDIR
 			if [ -d "$dir" ]; then
 				echo 2>&1 | tee -a $LOGFILE
 				echo "Found $dir" 2>&1 | tee -a $LOGFILE
@@ -900,19 +936,19 @@ if [ "$BACKUP_CHECK" = "yes" ]; then
 						fi
 
 						# check backup size
-						getincbackupsize $BACKUPDIR/$BTIME/incremental/accounts/$dir
+						getincbackupsize $USERBACKUPDIR/$dir
 						if [ "$incdiskusage" -gt "$MBLIMIT" ]; then
 
-							echo "Skipping ${cyan}$user{normal} as diskusage $incdisk usage is over limit of $MBLIMIT for backup dir $BACKUPDIR/$BTIME/incremental/accounts/$dir" 2>&1 | tee -a $LOGFILE
-                              				echo "Skipping $user $incdiskusage is over limit of $MBLIMIT for dir $BACKUPDIR/$BTIME/incremental/accounts/$dir Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+							echo "Skipping ${cyan}$user{normal} as diskusage $incdisk usage is over limit of $MBLIMIT for backup dir $USERBACKUPDIR/$dir" 2>&1 | tee -a $LOGFILE
+                              				echo "Skipping $user $incdiskusage is over limit of $MBLIMIT for dir $USERBACKUPDIR/$dir Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
 							echo
 							continue
 						fi
 					fi
 
 					# start backup
-					echo "Backing up user ${green}$dir${normal} folder $BACKUPDIR/$BTIME/incremental/accounts/$dir as cpmove-$dir-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
-					cd $BACKUPDIR/$BTIME/incremental/accounts
+					echo "Backing up user ${green}$dir${normal} folder $USERBACKUPDIR/$dir as cpmove-$dir-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
+					cd $USERBACKUPDIR
 					/admin/swift/fly $HOSTNAME $dir frombackup cpmove-$dir-$extension.tar.gz
 					cd $curdir
 					echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME $user-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
@@ -936,7 +972,7 @@ if [ "$BACKUP_CHECK" = "yes" ]; then
 	#/backup/2015-03-25/accounts/aimaiwoa.tar.gz
 	# only supporting weekly now
 	#echo "find $BACKUPDIR/weekly -maxdepth 1 -type f | grep /accounts/ | grep tar.gz$";
-	for file in `find $BACKUPDIR/weekly -maxdepth 3 -type f | grep /accounts/ | grep tar.gz$`; do
+	for file in `find $BACKUPDIR/weekly -maxdepth 3 -type f -printf "%T+\t%p\n" | sort -r | grep /accounts/ | grep tar.gz$ | awk '{print $2}'`; do
 	
 		user=`echo $file | cut -d/ -f6 | cut -d. -f1`;
 		cpaneldate=`echo $file | cut -d/ -f4`;	
@@ -945,9 +981,13 @@ if [ "$BACKUP_CHECK" = "yes" ]; then
 		echo 2>&1 | tee -a $LOGFILE
 		echo "Found file $file for user ${green}$user${normal} for date $cpaneldate" 2>&1 | tee -a $LOGFILE
 		if [ ! -f $file ]; then
-			echo "Hit error. file ${cyan}$file{normal} is not a file" 2>&1 | tee -a $LOGFILE
+			echo "Hit error. file ${cyan}$file${normal} is not a file on check 1 line $LINENO" 2>&1 | tee -a $LOGFILE
 			sleep 2s;
-			continue;
+			file=`find $BACKUPDIR/weekly -maxdepth 3 -type f | grep /accounts/ | grep ^${user}.tar.gz$ | head -n 1`;
+			if [ ! -f $file ]; then
+				echo "Hit error. file ${cyan}$file${normal} is not a file on check 2 line $LINENO" 2>&1 | tee -a $LOGFILE
+				continue;
+			fi
 		fi
 
 		#begin backup checks
@@ -983,16 +1023,28 @@ if [ "$BACKUP_CHECK" = "yes" ]; then
 		fi
 		#No match found
 		checkupload $file cpmove-$user-$cpaneldate.tar.gz
-		echo "  DEBUG: checkupload returned $check_upload" 2>&1 | tee -a $LOGFILE
+		#echo "  DEBUG: checkupload returned $check_upload at line $LINENO" 2>&1 | tee -a $LOGFILE
 		# codeblock2 (move to function)
+		# we check, if no match upload, then verify on run 2 (or keep trying)
 		if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
-			echo "Uploading backup for ${green}$user${normal} due to no match at line $LINENO" 2>&1 | tee -a $LOGFILE
-			sleep 1s;
-			/admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
-			sleep 5s;
-			echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
-        		/admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
-			sleep 2s;
+                        #echo "user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO time 1" 2>&1 | tee -a $LOGFILE
+                        for uploadnumbertimes in 1 2 3 4 5 6 7 8 9 10; do
+                                checkupload $file cpmove-$user-$cpaneldate.tar.gz
+                                if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ] ; then
+					# commenting out this, it appears to have no reason to run again, it will loop back and check. Running here will do the upload and not check
+                                        #checkupload $file cpmove-$user-$cpaneldate.tar.gz
+					/admin/swift/isrmsplit $HOSTNAME $file cpmove-$user-$cpaneldate.tar.gz
+                                        echo "RUN NUMBER $uploadnumbertimes user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
+                                        sleep ${uploadnumbertimes}m
+                                else
+                                       	echo "SUCCESS RUN NUMBER $uploadnumbertimes user ${cyan}$user${normal} md5sum matches $LINENO" 2>&1 | tee -a $LOGFILE
+                                        break;
+                                fi
+                        done
+
+                        echo "Sending deleteafter $DELETEAFTER days for ${green}$user${normal} upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
+                        /admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
+                        sleep 5s;
 		else
 			echo "$user file cpmove-$user-$cpaneldate.tar.gz checksum ok, no upload needed at line $LINENO" 2>&1 | tee -a $LOGFILE
 			COUNTSKIP=`expr $COUNTSKIP + 1`
@@ -1011,31 +1063,22 @@ if [ "$BACKUP_CHECK" = "yes" ]; then
         	if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
                 	echo "user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
                 	echo $uploadcheck;
-			checkuploaddebug $file cpmove-$user-$cpaneldate.tar.gz
+			checkuploaddebug "${file}" "cpmove-${user}-${cpaneldate}.tar.gz"
                 	echo "$user backup failed md5check. $uploadcheck Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup run failed md5" $MAILTO $MAILARGS2
 			COUNTFAILURE=`expr $COUNTFAILURE + 1`
                         echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
                         echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
                         echo "Total accounts skipped due to md5sum match $COUNTSKIP" 2>&1 | tee -a $LOGFILE
 
-			# second run
-			# codeblock2 reuse
-                        echo "Retrying cpmove-$user-$cpaneldate.tar.gz (second run) at line $LINENO" 2>&1 | tee -a $LOGFILE
-                        sleep 1m;
-                        /admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
-                        sleep 5s;
-                        echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
-                        /admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
-                        sleep 5s;
-
 			checkupload $file cpmove-$user-$cpaneldate.tar.gz 24
 			if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
 				RETRYFAILURE=`expr $RETRYFAILURE + 1`
-				echo "Second run of cpmove-$user-$cpaneldate.tar.gz failed" 2>&1 | tee -a $LOGFILE
+				echo "Second run of cpmove-$user-$cpaneldate.tar.gz failed at Line $LINENO" 2>&1 | tee -a $LOGFILE
+				echo "second run of cpmove-$user-$cpaneldate.tar.gz failed Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift second run FAILED" $MAILTO $MAILARGS2
 			else
 				RETRYSUCCESS=`expr $RETRYSUCCESS + 1`
 				echo "Second run of cpmove-$user-$cpaneldate.tar.gz was a success" 2>&1 | tee -a $LOGFILE
-				echo "second run of cpmove-$user-$cpaneldate.tar.gz was a success Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup second run success5" $MAILTO $MAILARGS2
+				echo "second run of cpmove-$user-$cpaneldate.tar.gz was a success Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift second run ok" $MAILTO $MAILARGS2
 			
 			        if [ "$YESTODELETE" = "1" ]; then
  	                               echo "Deleting $file due to DELETEDATE being set to $DELETEDATE" | tee -a $LOGFILE
@@ -1244,11 +1287,12 @@ for user in *; do
 	sleep 2s;
 
 	#check md5sum
+	#re code this
 	uploadcheck=`/admin/swift/rsync $HOSTNAME $PKGTMP/cpmove-$user.tar.gz --check cpmove-$user-$extension.tar.gz 24 2>/dev/null| egrep "No match found|do not match"`;
 	if [ ! "$uploadcheck" = "" ]; then
 		echo "user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
 		echo $uploadcheck;
-		checkuploaddebug $file cpmove-$user-$cpaneldate.tar.gz
+		checkuploaddebug "${file}" "cpmove-${user}-${cpaneldate}.tar.gz"
 		echo "$user backup failed md5check. $uploadcheck Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup run failed md5" $MAILTO $MAILARGS2
 		COUNTFAILURE=`expr $COUNTFAILURE + 1`
                 echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
@@ -1257,6 +1301,10 @@ for user in *; do
 
 		echo "Doing second run of uploading $PKGTMP/cpmove-$user.tar.gz" 2>&1 | tee -a $LOGFILE
 		sleep 1m;
+                if [ -f /root/.swift/.auth_key ]; then
+ 	               /bin/rm -v /root/.swift/.auth_key
+                fi
+
 		/admin/swift/rsync $HOSTNAME $PKGTMP/cpmove-$user.tar.gz --put cpmove-$user-$extension.tar.gz 2>&1 | tee -a $LOGFILE
 		sleep 5s;
 		/admin/swift/deleteafter $HOSTNAME cpmove-$user-$extension.tar.gz  $DELETEAFTER
@@ -1264,7 +1312,7 @@ for user in *; do
 		uploadcheck=`/admin/swift/rsync $HOSTNAME $PKGTMP/cpmove-$user.tar.gz --check cpmove-$user-$extension.tar.gz 24 2>/dev/null| egrep "No match found|do not match"`;
 		if [ ! "$uploadcheck" = "" ]; then
 			RETRYFAILURE=`expr $RETRYFAILURE + 1`
-			echo "Second run of cpmove-$user-$extension.tar.gz upload failed" 2>&1 | tee -a $LOGFILE
+			echo "Second run of cpmove-$user-$extension.tar.gz upload failed at Line $LINENO" 2>&1 | tee -a $LOGFILE
 		else
 			RETRYSUCCESS=`expr $RETRYSUCCESS + 1`
 			echo "Second run of cpmove-$user-$extension.tar.gz upload success" 2>&1 | tee -a $LOGFILE

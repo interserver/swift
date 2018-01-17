@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# 1.03.06.2017
+# 1.12.23.2017
 
 ###################################################
 #
@@ -13,7 +13,7 @@
 
 
 #-
-# Copyright (c) 2012 InterServer, Inc.
+# Copyright (c) 2017 InterServer, Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -40,7 +40,6 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 #/
-
 
 
 
@@ -85,6 +84,7 @@ fi
 
 sqlite="/usr/bin/sqlite3";
 
+# centos5 is finally EOL, we can remote this soon
 if [ -d /usr/share/doc/centos-release-5 -o `uname -r | cut -d- -f1` = "2.6.18" ]; then
 	splitprog="/admin/swift/include/split5";
 fi
@@ -98,12 +98,12 @@ if [ -x /opt/curl/bin/curl ]; then
 fi
 
 
-if [ -x "/root/cpaneldirect/pigz" ]; then
+if [ -x "/admin/swift/include/pigz" ]; then
 	arch=`uname -m`;
 	if [ "$arch" = "x86_64" ]; then
 		#echo "Using new split and pigz";
 		#splitprog="/root/cpaneldirect/split";
-		gzip="/root/cpaneldirect/pigz";
+		gzip="/admin/swift/include/pigz";
 	fi
 fi
 
@@ -161,17 +161,6 @@ function getauthkey()
 
 	auth_key=`${curl} -v $CURLOPTS -H "X-Storage-User: ${username}" -H "X-Storage-Pass: ${pass}" $AUTH_URL 2>&1 | grep "^< X-" | grep -v "X-Storage-Token:" | cut -d " " -f2- > /$file`;
 
-}
-
-# check age of auth key
-function age() {
-   local filename=$1
-   local changed=`$stat -c %Y "$filename"`
-   local now=`date +%s`
-   local elapsed
-
-   let elapsed=now-changed
-   echo $elapsed
 }
 
 
@@ -918,7 +907,7 @@ function rsyncfile()
 		if [ "$localetag" = "$remoteetag" ]; then
 			echo "${green}Checksums match${normal} for container: ${green}${CONTAINER}${normal} file ${green}${REMOTEFILE}${normal}";
 		else
-			echo "Uploading container ${CONTAINER} file ${FILE} remotefile ${REMOTEFILE} (if blank to change)";
+			echo "Uploading container ${CONTAINER} file ${FILE} remotefile ${REMOTEFILE} (if blank no change)";
 			upload ${CONTAINER} "${FILE}" ${REMOTEFILE}
 			if [ ! "$5" = "" ]; then
 				echo "Deleting ${CONTAINER} ${REMOTEFILE} after $5 days";
@@ -967,7 +956,7 @@ function delete_splits()
 {
 
 	if [ "$1" = "" -o "$2" = "" ]; then
-                echo 'Usage ./isrmsplit container filename (must be full path) | OR | container filename nodb (for non sqlit splits) rmdir';
+                echo 'Usage ./isrmsplit container filename (must be full path) remotefilename | OR | container filename nodb (for non sqlit splits) rmdir';
         else
 
 		FILENAME=$2;
@@ -978,7 +967,11 @@ function delete_splits()
 			if [ ! -f $FILENAME ]; then
 				echo 'filename must be full path or pass no db (this is for splitdb';
 			else
-				REMOTEFILENAME=`basename ${FILENAME}`;
+				if [ "$3" = "" ]; then
+					echo "Usage ./isrmsplit container fullfilenamepath remotefilename|nodb";
+					exit;
+				fi
+				REMOTEFILENAME=$3;
 			fi
 		fi
 
@@ -1415,7 +1408,7 @@ normal=$(tput sgr0)
 
 
 if [ -e $file ]; then
-        if [ $(age "$file") -gt "1000" ]; then
+	if [ "$(( $(date +"%s") - $(stat -c "%Y" $file) ))" -gt "1000" ]; then
 		if [ "$debug" = "1" ]; then
                 	echo 'Auth key found but too old, and removed';
 		fi
@@ -1434,6 +1427,32 @@ fi
 
 
 APIKEY=`cat $file | grep ^X-Auth-Token: | cut -d: -f2 | tr -d '\r'`;
+
+# retry to get api key if failed
+if [ "$APIKEY" = "" ]; then
+        echo "APIKEY missing, username/pass may be wrong or remove $file";
+	sleep 1s;
+	echo -n 'Trying again';
+	for tryapiagain in 0 2 3 4 5; do
+		echo -n " $tryapiagain";
+		getauthkey
+		APIKEY=`cat $file | grep ^X-Auth-Token: | cut -d: -f2 | tr -d '\r'`;
+		if [ "$APIKEY" = "" ]; then
+			echo -n '..failed..';
+			if [ "$tryapiagain" = "5" ]; then
+				echo "..exiting at time $tryapiagain";
+				exit;
+			fi
+		else
+			echo -n '..success';
+			echo
+			break;
+		fi
+	done
+	
+fi
+
+
 SSL_STORAGE_URL=`cat $file | grep ^X-Storage-Url: | cut -d" " -f2 | tr -d '\r'`;
 NON_SSL_STORAGE_URL=`cat $file | grep ^X-Storage-Url: | cut -d" " -f2 | tr -d '\r' | sed s#"https:"#"http:"#g | sed s#":8080"#":80"#g`;
 STORAGE_URL="$NON_SSL_STORAGE_URL";

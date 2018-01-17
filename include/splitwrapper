@@ -72,7 +72,7 @@ else
 			remotemd5=`/admin/swift/getsig $WRCONTAINER ${WRREALFILE}/split-${FILE}`;
 			if [ "$localmd5" = "$remotemd5" ]; then
 				echo "$retrysplitupload retry -  Check sum matches"
-				continue;
+				break;
 			else
 				echo "Upload failed time $retrysplitupload local $localmd5 remote $remotemd5";
 				if [ "$retrysplitupload" = "10" ]; then

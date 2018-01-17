@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# 02.16.2017
+# 01.12.2018
+# touch /standalone for non int vps's
 
 if [ ! -d /root/cpaneldirect -a ! -d /usr/local/solusvm ]; then
 	echo "No cpaneldirect folder or solusvm" 
@@ -8,10 +9,19 @@ if [ ! -d /root/cpaneldirect -a ! -d /usr/local/solusvm ]; then
 fi
 
 if [ "$1" = "" ]; then
-	echo 'Usage ./vpsbackup ID';
+	echo 'Usage ./vpsbackup ID OPTIONAL|all|noswift|monthly|load';
 	exit;
 elif [ "$1" = "all" ]; then
-	if [ -f /win ]; then
+        if [ -f /standalone ]; then
+
+                if [ "$2" = "noswift" ]; then
+                        for ID in `virsh list | grep run | awk '{print $2}'`; do nice -n 19 ionice -c3 /admin/swift/vpsbackup $ID noswift; sleep 1m; done
+                else
+                        for ID in `virsh list | grep run | awk '{print $2}'`; do nice -n 19 ionice -c3 /admin/swift/vpsbackup $ID; sleep 1m; done
+                fi
+
+                exit;
+	elif [ -f /win ]; then
 		for ID in `virsh list | grep run | awk '{print $2}' | cut -c8-`; do nice -n 19 ionice -c3 /admin/swift/vpsbackup $ID; sleep 1m; done
 		exit;
 	elif [ -f /lin ]; then
@@ -55,6 +65,16 @@ fi
 
 date=`date +%Y-%m-%d`
 
+if [ "$2" = "noswift" ]; then
+	echo 'Using call with no swift - only designed for KVM';
+	sleep 2s;
+	noswift=1;
+	if [ ! -d /backup ]; then
+		echo '/backup does not exist';
+		exit;
+	fi
+fi
+
 if [ ! -e /root/tmp ]; then
 	mkdir -p /root/tmp
 fi
@@ -63,8 +83,10 @@ LOGFILE=/root/tmp/swift.log
 export RUN_BY_CRON=1;
 
 
+echo | tee -a $LOGFILE
+echo "	Starting run at $date" | tee -a $LOGFILE
 
-if [ -e /usr/bin/virsh ]; then
+if [ -e /usr/bin/virsh -a ! -e /usr/bin/prlctl ]; then
 	echo 'KVM' 2>&1 | tee -a $LOGFILE
 	if [ -f /win ]; then
 		TYPE=windows;
@@ -143,27 +165,85 @@ if [ -e /usr/bin/virsh ]; then
  	               exit;
                 fi
 
-		echo "Deleting after 60 days by sending deleteafter $CONTAINER $NAME 60" 2>&1 | tee -a $LOGFILE
-		sleep 10s;
-        	/admin/swift/deleteafter $CONTAINER $NAME 60 2>&1 | tee -a $LOGFILE
-	        echo y | lvremove ${VZPATH}/$myuuID 2>&1 | tee -a $LOGFILE
+		if [ ! "$noswift" = "1" ]; then
+			echo "Deleting after 60 days by sending deleteafter $CONTAINER $NAME 60" 2>&1 | tee -a $LOGFILE
+			sleep 10s;
+        		/admin/swift/deleteafter $CONTAINER $NAME 60 2>&1 | tee -a $LOGFILE
+		fi
+
+        	echo y | lvremove ${VZPATH}/$myuuID 2>&1 | tee -a $LOGFILE
 		echo 'Settling for 15 seconds';
 		sleep 15s;
-
 	}
 
-	/admin/swift/ismkdir $CONTAINER
+	if [ ! "$noswift" = "1" ]; then
+		/admin/swift/ismkdir $CONTAINER
+	fi
 	echo "creating $VPS snapshot called $myuuID" 2>&1 | tee -a $LOGFILE
 
 	trap "{ cleanupkvm; exit; }" EXIT
 
 	lvcreate -L2048M -s -n $myuuID ${VZPATH}/$VMID  2>&1 | tee -a $LOGFILE
-	/admin/swift/ddlvm $myuuID $CONTAINER $NAME 2>&1 | tee -a $LOGFILE
+	if [ ! "$noswift" = "1" ]; then
+		/admin/swift/ddlvm $myuuID $CONTAINER $NAME 2>&1 | tee -a $LOGFILE
+	else
+		echo 'Non swift DD' | tee -a $LOGFILE
+		dd bs=4096 conv=noerror if=${VZPATH}/$myuuID  | gzip -1c > /backup/$NAME.gz | tee -a $LOGFILE
+	fi
 
 	#cleanupkvm;
 
-
 	trap - TERM
+
+elif [ -f /usr/bin/prlctl ]; then
+	echo 'Openvz 7' 2>&1 | tee -a $LOGFILE
+        CTID=${ID};
+
+	check=`prlctl list --all | grep "CT vps${CTID}$"`;
+	if [ "$check" = "" ]; then
+		prlctl list --all
+		echo
+		echo "No running vps for ID ${CTID}" 2>&1 | tee -a $LOGFILE
+		exit;
+	fi
+
+	MYUUID=`prlctl list -o uuid --no-header vps${CTID} | cut -d{ -f2 | cut -d} -f1`;
+	if [ ! -d /vz/private/${MYUUID} ]; then
+		echo "/vz/private/${MYUUID} does not exist for CTID ${CTID}" 2>&1 | tee -a $LOGFILE
+		exit;
+	fi
+
+        function cleanupvz7()
+        {
+                        if [ "$CTID" = "" ]; then
+                                echo "Clean up has no CTID" 2>&1 | tee -a $LOGFILE
+                                exit;
+                        fi
+
+			mysnap=`prlctl snapshot-list vps${CTID} --tree | cut -d{ -f2 | cut -d} -f1`;
+			if [ "$mysnap" = "" ]; then
+				echo 'Got back a blank snapshot, not deleting';
+			else
+				prlctl snapshot-delete vps${CTID} --id $mysnap 2>&1 | tee -a $LOGFILE
+        	                echo "Deleting after 60 days sending deleteafter vps${CTID} ${CTID}-backup-$date 60" 2>&1 | tee -a $LOGFILE
+                	        sleep 10s;
+                        	/admin/swift/deleteafter vps${CTID} autobackup-$date 60 2>&1 | tee -a $LOGFILE
+                        	echo 'Settling for 15 seconds';
+                        	sleep 15s;
+		fi
+        }
+
+
+
+        trap "{ cleanupvz7; exit; }" EXIT
+
+	prlctl snapshot vps${CTID} 2>&1 | tee -a $LOGFILE
+        /admin/swift/ismkdir vps${CTID} 2>&1 | tee -a $LOGFILE
+	# removed root.hdd from here as we need to ensure we get all the data
+        /admin/swift/fly vps${CTID} /vz/private/${MYUUID}/ frombackup ${CTID}-backup-$date $myuuID 2>&1 | tee -a $LOGFILE
+        #cleanupvz;
+
+        trap - TERM
 
 elif [ -f /usr/sbin/vzctl ]; then
 
@@ -190,12 +270,12 @@ elif [ -f /usr/sbin/vzctl ]; then
 	function cleanupvz()
 	{
 			if [ "$CTID" = "" ]; then
-				echo "Clean up has to CTID" 2>&1 | tee -a $LOGFILE
+				echo "Clean up has no CTID" 2>&1 | tee -a $LOGFILE
 				exit;
 			fi
 
 			if [ "$myuuID" = "" ]; then
-                                echo "Clean up has to $myuuID" 2>&1 | tee -a $LOGFILE
+                                echo "Clean up has no $myuuID" 2>&1 | tee -a $LOGFILE
                                 exit;
                         fi
 
