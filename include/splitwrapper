@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+# swift upload wrapper beta
+# rewrite md5check of split upload to not reuse code
+
+randomshm=`/admin/randompass swift`;
+
+if [ "$WRCONTAINER" = "" ]; then
+        echo 'No container sent';
+        exit;
+fi
+
+if [ "$FILE" = "" ]; then
+        echo 'No File variable sent';
+        exit;
+fi
+
+if [ "$WRREALFILE" = "" ]; then
+        echo 'No Realfile variable sent';
+        exit;
+fi
+
+if [ -e /etc/master.passwd ]; then
+	TMP_DIR=/tmp;
+else
+	TMP_DIR=/dev/shm;
+fi
+
+mkdir -p $TMP_DIR/$randomshm
+
+if [ -f $TMP_DIR/$randomshm/$FILE ]; then
+        echo "$TMP_DIR/$randomshm/$FILE exists exiting";
+        exit;
+fi
+
+if [ $# -eq 0 ]; then
+        cat > $TMP_DIR/$randomshm/$FILE
+else
+        echo "exiting no data sent";
+        exit;
+fi
+
+# verify
+# md5sum test  | awk '{print $1}'
+if [ ! -f $TMP_DIR/$randomshm/$FILE ]; then
+        echo "$TMP_DIR/$randomshm/$FILE does not exist, we have some error";
+        exit;
+fi
+
+#md5
+if [ -e /etc/master.passwd ]; then
+	localmd5=`md5 $TMP_DIR/$randomshm/$FILE | awk '{print $4}'`
+else
+	localmd5=`md5sum $TMP_DIR/$randomshm/$FILE | awk '{print $1}'`
+fi
+if [ "$localmd5" = "" ]; then
+        echo 'ERROR: Returned a blank localmd5';
+else
+        echo "Found md5sum $localmd5";
+        /admin/swift/isput $WRCONTAINER $TMP_DIR/$randomshm/${FILE} ${WRREALFILE}/split-${FILE}
+	sleep 1s;
+        remotemd5=`/admin/swift/getsig $WRCONTAINER ${WRREALFILE}/split-${FILE}`;
+        echo "Got REMOTE md5sum $remotemd5";
+	if [ "$localmd5" = "$remotemd5" ]; then
+		echo "Check sum matches"
+	else
+		echo "1x Failed check sum match, re-uploading";
+		sleep 5s;
+		for retrysplitupload in 2 3 4 5 6 7 8 9 10; do
+			/admin/swift/isput $WRCONTAINER $TMP_DIR/$randomshm/${FILE} ${WRREALFILE}/split-${FILE}
+			sleep 10s;
+			remotemd5=`/admin/swift/getsig $WRCONTAINER ${WRREALFILE}/split-${FILE}`;
+			if [ "$localmd5" = "$remotemd5" ]; then
+				echo "$retrysplitupload retry -  Check sum matches"
+				continue;
+			else
+				echo "Upload failed time $retrysplitupload local $localmd5 remote $remotemd5";
+				if [ "$retrysplitupload" = "10" ]; then
+					echo '10 uploads tried - not trying again';
+				fi
+			fi
+		done
+	fi
+fi
+
+/bin/rm -v $TMP_DIR/$randomshm/$FILE
+
+echo "done on $FILE upload to $WRCONTAINER";
+echo "";
+sleep 1s;
+
+/bin/rmdir -v $TMP_DIR/$randomshm

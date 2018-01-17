@@ -1,0 +1,156 @@
+#!/bin/bash
+
+
+# sqlite3 $db "create table split (id INTEGER PRIMARY KEY,path TEXT,name TEXT,sum TEXT,main TEXT);
+
+if [ ! -f "$sqlite" ]; then
+	echo "sqlite3 is not installed at $sqlite, exiting";
+	exit;
+fi
+
+if [ ! -e "$db" ]; then
+	echo "Creating sqlite DB at $db";
+	$sqlite $db "create table split (id INTEGER PRIMARY KEY,path TEXT,name TEXT,sum TEXT,main TEXT, age INTEGER);"
+fi
+
+if [ ! -f /root/.swift/_newsqlite2 ]; then
+	sqlitecheck=`file $db | grep 2.x`;
+	if [ ! "$sqlitecheck" = "" ]; then
+		echo 'Upgrading db $db to sqlite3';
+		mv -v $db $db.2
+		if [ -x /usr/bin/sqlite ]; then
+			/usr/bin/sqlite $db.2 .dump | $sqlite $db
+		else
+			echo '/usr/bin/sqlite not found fpr sqlite 2.x dump';
+			exit;
+		fi
+	fi
+	agecheck=`$sqlite $db "PRAGMA table_info(split)" | grep age`;
+	if [ "$agecheck" = "" ]; then
+		echo "Adding age colum to db $db";
+		$sqlite $db "ALTER TABLE split ADD COLUMN age INTEGER"
+
+	fi
+
+	xtracheck=`$sqlite $db "PRAGMA table_info(split)" | grep xtra`;
+	 if [ "$xtracheck" = "" ]; then
+		echo "Adding xtra colum to db $db";
+                $sqlite $db "ALTER TABLE split ADD COLUMN xtra INTEGER"
+        fi
+	
+
+	touch /root/.swift/_newsqlite2
+	/bin/rm /root/.swift/_newsqlite
+fi
+
+function abspath()
+{
+	if [[ -d "$1" ]]
+	then
+		pushd "$1" >/dev/null
+		pwd
+		popd >/dev/null
+	elif [[ -e $1 ]]
+	then
+		pushd $(dirname $1) >/dev/null
+		echo $(pwd)/$(basename $1)
+		popd >/dev/null
+	else
+		echo $1 does not exist! >&2
+		return 127
+	fi
+}
+
+function fileverify()
+{
+	FILENAME=$1;
+        if [ ! -e "${FILENAME}" ]; then
+                echo "${FILENAME} does not exist in file sqlite at line $LINENO";
+                exit;
+        fi
+        FULLFILE=`abspath ${FILENAME}`;
+	# strip path
+	FILENAME=`basename ${FILENAME}`;
+}
+
+function check()
+{
+	XTRA=$2;
+	fileverify $1
+	if [ "$3" = "24" ]; then
+		# Default sqlite is in gmt
+		#$sqlite $db "select sum from split where path='$FULLFILE' and main='0' and xtra='$XTRA' and age BETWEEN datetime('now', '-2 days') AND datetime('now', 'localtime')"
+		$sqlite $db "select sum from split where path='$FULLFILE' and main='0' and xtra='$XTRA' and age BETWEEN datetime('now', '-2 days') AND datetime('now')"
+	else
+		$sqlite $db "select sum from split where path='$FULLFILE' and main='0' and xtra='$XTRA'"
+	fi
+}
+
+##select name from split where path='/backup/cpbackup/weekly/ramsat.tar.gz' and main='0';
+#remote function, used to delete splits. No verify needed here
+function get_splits()
+{
+	if [ "$1" = "" ]; then
+		echo "No filename passed in function get_splits in file sqlite at $LINENO";
+	fi
+	FULLFILE=${1};
+	XTRA=$2;
+	$sqlite $db "select name from split where path='$FULLFILE' and main='0' and xtra='$XTRA'"
+}
+
+function checkmain()
+{
+	fileverify $1
+	XTRA=$2;
+	$sqlite $db "select sum from split where path='$FULLFILE' and main='1' and xtra='$XTRA'"
+}
+
+function sqdelete()
+{
+	fileverify $1
+	XTRA=$2;
+	$sqlite $db "delete from split where PATH='$FULLFILE' and xtra='$XTRA'"
+}
+
+#insert ${FILENAME} $splitfiles $splitsum
+function insert()
+{
+	splitfiles=$2;
+	splitsum=$3;
+	# remote file name
+	XTRA=$4;
+
+	if [ "$splitfiles" = "" ]; then
+		echo "splitfiles is blank in file sqlite at line $LINENO";
+		exit;
+	elif [ "$splitsum" = "" ]; then
+		echo "splitsum is blank in file sqlite at line $LINENO";
+		exit;
+	fi
+
+	fileverify $1
+	$sqlite $db "insert into split (path,name,sum,main,age,xtra) values ('$FULLFILE','$splitfiles','$splitsum','0',datetime('now'),'$XTRA');"
+}
+
+#insertmain ${FILENAME} $localmd5
+function insertmain()
+{
+	localmd5=$2;
+	# remote filename
+	XTRA=$3;
+	if [ "$localmd5" = "" ]; then
+                echo "localmd5 is blank in file sqlite at line $LINENO";
+                exit;
+	fi
+	fileverify $1
+	$sqlite $db "delete from split where path='$FULLFILE' and name='main' and sum='$localmd5' and main='1' and xtra='$XTRA'"
+	$sqlite $db "insert into split (path,name,sum,main,age,xtra) values ('$FULLFILE','main','$localmd5','1',datetime('now'),'$XTRA');"
+}
+
+function deleteoldsplitover60()
+{
+	echo "Removing splits over 60 days";
+	$sqlite $db "DELETE FROM split WHERE datetime(age) < datetime('now','-60 day');"
+}
+
+#check $1

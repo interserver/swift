@@ -1,0 +1,225 @@
+#!/bin/bash
+
+# 02.16.2017
+
+if [ ! -d /root/cpaneldirect -a ! -d /usr/local/solusvm ]; then
+	echo "No cpaneldirect folder or solusvm" 
+	exit;
+fi
+
+if [ "$1" = "" ]; then
+	echo 'Usage ./vpsbackup ID';
+	exit;
+elif [ "$1" = "all" ]; then
+	if [ -f /win ]; then
+		for ID in `virsh list | grep run | awk '{print $2}' | cut -c8-`; do nice -n 19 ionice -c3 /admin/swift/vpsbackup $ID; sleep 1m; done
+		exit;
+	elif [ -f /lin ]; then
+		for ID in `virsh list | grep run | awk '{print $2}' | cut -c6-`; do nice -n 19 ionice -c3 /admin/swift/vpsbackup $ID; sleep 1m; done
+		exit;
+	elif [ -x /usr/sbin/vzlist ]; then
+		for ID in `vzlist  | grep run | awk '{print $1}'`; do nice -n 19 ionice -c3 /admin/swift/vpsbackup $ID; sleep 1m; done
+		exit;
+	else
+		echo "Did not find vps type in all backup at line $LINENO";
+		exit;
+	fi
+elif [ "$1" = "monthly" ]; then
+# monthly skip 1 slice vps
+	if [ -f /root/cpaneldirect/vps.slicemap ]; then
+		for ID in `cat /root/cpaneldirect/vps.slicemap | grep -v :1$ | grep : | cut -d: -f1`; do nice -n 19 ionice -c3 /admin/swift/vpsbackup $ID load; sleep $(( RANDOM % (600 - 5 + 1 ) + 5 )); done
+		exit;
+	else
+		echo 'Error: did not find /root/cpaneldirect/vps.slicemap';
+		exit;
+	fi
+else
+	ID=$1;
+fi
+
+# will be expanded in the future
+if [ "$2" = "load" ]; then
+	echo 'Calling with load checks';
+	pscheck=`ps auxw | grep [/]admin/swift/cpanelbackup`;
+	if [ ! "$pscheck" = "" ]; then
+		echo 'backup process is running, sleepling 1000s';
+		sleep 1000s;
+	fi
+
+	loadcheck=`cat /proc/loadavg  | awk '{print $1}' | cut -d. -f1`;
+	if [ "$loadcheck" -gt "10" ]; then
+		echo 'Load over 10 sleeping for 1000s';
+		sleep 1000s;
+	fi
+fi
+
+date=`date +%Y-%m-%d`
+
+if [ ! -e /root/tmp ]; then
+	mkdir -p /root/tmp
+fi
+
+LOGFILE=/root/tmp/swift.log
+export RUN_BY_CRON=1;
+
+
+
+if [ -e /usr/bin/virsh ]; then
+	echo 'KVM' 2>&1 | tee -a $LOGFILE
+	if [ -f /win ]; then
+		TYPE=windows;
+	elif [ -f /cloud ]; then
+		TYPE=qs;
+	elif [ -f /standalone ]; then
+		TYPE='';
+	else
+		TYPE=linux;
+	fi
+
+        #SOLUSVM backup
+        if [ -d /usr/local/solusvm ]; then
+		TYPE='';
+ 	       	echo 'Found SolusVM';
+               	SOLUSVM=`vgdisplay  | grep "VG Name" | awk '{print $3}' | head -n 1`;
+               	echo "VG name is $SOLUSVM";
+               	if [ "$SOLUSVM" = "" ]; then
+        	       echo "VG path is blank at $LINENO";
+                       exit;
+               	fi
+               
+		VZPATH="/dev/${SOLUSVM}";
+                if [ -d /dev/${SOLUSVM} ]; then
+                	echo "Using /dev/${SOLUSVM}";
+                else
+                	echo "/dev/${SOLUSVM} is not a directory";
+                        exit;
+                fi
+			
+			VPS=`echo ${ID} | cut -d_ -f1`
+			VMID=${ID};
+        else
+                        VZPATH=/dev/vz;
+			VPS="${TYPE}${ID}"
+			VMID=$VPS;
+        fi
+
+	CONTAINER="vps${ID}"
+	NAME="${TYPE}${ID}-${date}"
+
+	echo "Found: $VPS $CONTAINER $NAME on $date" 2>&1 | tee -a $LOGFILE
+
+	if [ ! -x /usr/bin/virsh ]; then
+ 		echo "no virsh" 2>&1 | tee -a $LOGFILE
+ 		exit;
+	fi
+
+	if [ ! -L ${VZPATH}/${VMID} ]; then
+ 		echo "${VZPATH}/$VMID not a symlink" 2>&1 | tee -a $LOGFILE
+		exit;
+	fi
+
+	check=`virsh list --all | grep $VPS | awk '{print $2}'`;
+	if [ ! "$check" = "$VPS" ]; then
+		echo "virsh did not find this vps $VPS" 2>&1 | tee -a $LOGFILE
+ 		exit;
+	fi
+
+	myuuID=$(uuidgen)
+	if [ "$myuuID" = "" ]; then
+ 		echo "Error: did not get a uuid for snapshot" 2>&1 | tee -a $LOGFILE
+ 		exit;
+	fi
+
+	function cleanupkvm()
+	{
+
+		if [ "$VPS" = "" ]; then
+                        echo "Clean up has no VPS id" 2>&1 | tee -a $LOGFILE
+        	        exit;
+                fi
+
+                if [ "$myuuID" = "" ]; then
+                       echo "Clean up has no $myuuID" 2>&1 | tee -a $LOGFILE
+ 	               exit;
+                fi
+
+		echo "Deleting after 60 days by sending deleteafter $CONTAINER $NAME 60" 2>&1 | tee -a $LOGFILE
+		sleep 10s;
+        	/admin/swift/deleteafter $CONTAINER $NAME 60 2>&1 | tee -a $LOGFILE
+	        echo y | lvremove ${VZPATH}/$myuuID 2>&1 | tee -a $LOGFILE
+		echo 'Settling for 15 seconds';
+		sleep 15s;
+
+	}
+
+	/admin/swift/ismkdir $CONTAINER
+	echo "creating $VPS snapshot called $myuuID" 2>&1 | tee -a $LOGFILE
+
+	trap "{ cleanupkvm; exit; }" EXIT
+
+	lvcreate -L2048M -s -n $myuuID ${VZPATH}/$VMID  2>&1 | tee -a $LOGFILE
+	/admin/swift/ddlvm $myuuID $CONTAINER $NAME 2>&1 | tee -a $LOGFILE
+
+	#cleanupkvm;
+
+
+	trap - TERM
+
+elif [ -f /usr/sbin/vzctl ]; then
+
+	echo 'OpenVZ' 2>&1 | tee -a $LOGFILE
+	CTID=$ID;
+
+	if [ ! -e /etc/vz/conf/$CTID.conf ]; then
+		echo 'vz/conf file not found' 2>&1 | tee -a $LOGFILE
+		exit;
+	fi
+
+	if [ ! `vzlist -H $CTID -o layout` = "ploop" ]; then
+        	echo "$CTID is not ploop" 2>&1 | tee -a $LOGFILE
+		echo 'Will run slower on the fly backup with out a snapshot' 2>&1 | tee -a $LOGFILE
+		sleep 5s;
+		if [ -d /vz/private/${CTID} ]; then
+			/admin/swift/fly vps${CTID} /vz/private/${CTID} frombackup simfs-${CTID}-backup-$date | tee -a $LOGFILE
+		else
+			echo "/vz/private/${CTID} does not exist" | tee -a $LOGFILE
+			exit;
+		fi		
+	fi
+
+	function cleanupvz()
+	{
+			if [ "$CTID" = "" ]; then
+				echo "Clean up has to CTID" 2>&1 | tee -a $LOGFILE
+				exit;
+			fi
+
+			if [ "$myuuID" = "" ]; then
+                                echo "Clean up has to $myuuID" 2>&1 | tee -a $LOGFILE
+                                exit;
+                        fi
+
+		        vzctl snapshot-delete $CTID --id $myuuID 2>&1 | tee -a $LOGFILE
+		        echo "Deleting after 60 days sending deleteafter vps${CTID} ${CTID}-backup-$date 60" 2>&1 | tee -a $LOGFILE
+			sleep 10s;
+        		/admin/swift/deleteafter vps${CTID} autobackup-$date 60 2>&1 | tee -a $LOGFILE
+			echo 'Settling for 15 seconds';
+                	sleep 15s;
+
+	}
+
+	myuuID=$(uuidgen)
+	VE_PRIVATE=$(vzlist -H -o private $CTID)
+
+	trap "{ cleanupvz; exit; }" EXIT
+
+	vzctl snapshot $CTID --id $myuuID --skip-suspend --skip-config 2>&1 | tee -a $LOGFILE
+	/admin/swift/ismkdir vps${CTID} 2>&1 | tee -a $LOGFILE
+	/admin/swift/fly vps${CTID} $VE_PRIVATE/root.hdd/ frombackup ${CTID}-backup-$date $myuuID 2>&1 | tee -a $LOGFILE
+	#cleanupvz;
+	
+	trap - TERM
+else
+	echo 'No VM software found' 2>&1 | tee -a $LOGFILE
+fi
+

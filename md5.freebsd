@@ -1,0 +1,8 @@
+#!/bin/bash
+
+export file=$1;
+
+if [ -f $file ]; then
+        md5 $file | awk '{print $4 " " ENVIRON["file"] }'
+fi
+

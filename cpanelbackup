@@ -1,0 +1,1291 @@
+#!/bin/bash
+
+# john@interserver.net
+
+# open 8080 in firewall
+# install bc
+# only supporting weekly in the new backup for now
+# touch /root/.swift/_lesspriv
+# touch /root/.swift/_enablecpanelswift
+# touch /root/.swift/username_skipall - disable backups and checks
+
+# touch /root/.swift/username_nodisable - never disable backups
+
+# options
+# backupcheck - disabled accounts only
+# ./cpanelbackup backupcheck (exit after disk check)
+# diskcheck - all
+# uploadtest - only run upload test
+
+#VARIABLES
+#export NOBACKUPCHECK=1;
+#export DELETEDATE=2016-11-20;
+#export NOSLASHLIMIT=1;
+
+#todo
+# add replace getdiskspace with cached lookup
+# run that cachedspace lookup once in a while. Automatically editing backup enabled / disabled in /var/cpanel/users/username
+# * check age of cpanel backup process
+#
+# check inodes
+# check /tmp for being full
+#
+# add legacy inremental
+
+# make mail function
+#echo "test" | /bin/mail -s "subject" "john@interserver.net" -- -f sysadmin@trouble-free.net <-- c5
+#echo "test" | /bin/mail -r sysadmin@interserver.net -s "subject" "john@interserver.net" < -- c6
+
+MYVERSION='03.22.2017';
+
+#config
+#must have mailx installed
+MAILTO=`/admin/getcontact`;
+# with out backups
+# disk space in mb
+MBLIMIT=12000;
+
+#inode in mb
+INLIMIT=300000;
+
+#-rw------- 1 root root 11403877126 Mar 25 21:57 /backup/2015-03-25/accounts/trendvid.tar.gz
+# with backups
+CPLIMIT=11403877126;
+
+# days to delete after
+DELETEAFTER=40;
+
+
+if [ -f /root/.swift/hostname ]; then
+        HOSTNAME=`cat /root/.swift/hostname`;
+        echo "Overriding hostname at $HOSTNAME";
+else
+        HOSTNAME=`/bin/hostname`;
+fi
+
+if [ "$HOSTNAME" = "fold.interserver.net" ]; then
+	PKGTMP='/backup'
+	echo "Set PKGTMP to non default $PKGTMP";
+else
+	PKGTMP='/home/cpbackuptmp';
+fi
+
+export HOME=/root
+
+if [ ! -e /opt/curl/bin/curl ]; then
+	# not centos7
+	if [ ! `cat /etc/redhat-release  | awk '{print $4}' | cut -d. -f1` = "7" ]; then
+        	dir=`pwd`;
+        	cd /admin/ports
+        	./install curl
+        	cd $dir
+	fi
+fi
+
+
+date='/bin/date';
+FROM='sysadmin@trouble-free.net';
+if [ "$1" = "backupcheck" -o "$1" = "diskcheck" ]; then
+	export RUN_BY_CRON=0;
+else
+
+	export RUN_BY_CRON=1;
+fi
+
+extension=`${date} +%Y-%m-%d`;
+# yes both needed
+logextension=`${date} +%Y-%m-%d`;
+
+#colors
+# only if we are interative
+if [[ $- == *i* ]]; then
+	blue=$(tput setaf 4)
+	green=$(tput setaf 2)
+	cyan=$(tput setaf 6)
+	normal=$(tput sgr0)
+fi
+
+echo "Contact mail is $MAILTO";
+if [ -d /usr/share/doc/centos-release-5 -o `uname -r | cut -d- -f1` = "2.6.18" -o -f /root/.swift/_forcecentos5mail ]; then
+	echo "Detected centos5" 
+	MAILARGS2="-- -f $FROM"
+	MAILARGS="";
+else
+	MAILARGS="-r $FROM"
+	MAILARGS2="";
+fi
+
+if [ "$1" = "mailtest" ]; then
+	echo "Running mailtest and existing";
+	echo "test message $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME test message" $MAILTO $MAILARGS2
+	exit;
+fi
+echo
+
+#sanity check
+if [ ! -d $PKGTMP ]; then
+	mkdir -p -v $PKGTMP
+fi
+
+if [ ! -e /usr/local/cpanel ]; then
+	echo 'cPanel Only';
+        exit;
+fi
+
+if [ ! -x /admin/swift/c ]; then
+	echo '/admin/swift/c missing or not executable';
+	exit;
+fi
+
+if [ ! -e /root/.swift/_lesspriv ]; then
+	/admin/swift/ismkdir $HOSTNAME
+fi
+
+# check for disk space over 95%
+SLASHLIMIT=95;
+if [ ! "$HOSTNAME" = "fold.interserver.net" ]; then
+	SLASHLIMIT=98;
+else
+	SLASHLIMIT=95;
+fi
+
+if [ "$NOSLASHLIMIT" = "1" ]; then
+	if [ `df -m | grep /$ | awk '{print $5}' | cut -d% -f1` -gt "$SLASHLIMIT" ]; then
+		echo "Warning / is over ${SLASHLIMIT}%, existing";
+		echo "Reduce the disk space Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME / is over ${SLASHLIMIT}%" $MAILTO $MAILARGS2
+		exit;
+	fi
+else
+	echo 'Skipping slashcheck due to NOSLASHLIMIT=1';
+fi
+
+if [ -f /root/.swift/_skipdisk ]; then
+	echo 'Skipping disk space checks'
+fi
+
+/admin/upscripts
+
+LOGFILE=/root/tmp/swift/log-$logextension;
+
+if [ ! -d /root/tmp/swift ]; then
+        mkdir -p /root/tmp/swift
+fi
+
+touch $LOGFILE
+
+echo "Log file will be $LOGFILE";
+
+echo "Starting backup for $HOSTNAME on $extension to log $LOGFILE cpanelbackup version $MYVERSION" 2>&1 | tee -a $LOGFILE
+COUNTSUCCESS=0;
+COUNTFAILURE=0;
+COUNTSKIP=0;
+
+# test upload
+function uploadrandom()
+{
+	ok=0;
+	randomfile='';
+	randomcheck='';
+	# clear stale key
+	if [ -f /root/.swift/.auth_key ]; then
+                /bin/rm -v /root/.swift/.auth_key
+        fi
+
+	randomfile=`/admin/randompass swift`;
+	touch $PKGTMP/$randomfile
+	echo "testing upload with $PKGTMP/$randomfile" 2>&1 | tee -a $LOGFILE
+	/admin/swift/isput $HOSTNAME $PKGTMP/$randomfile 2>&1 | tee -a $LOGFILE
+        /bin/rm -v $PKGTMP/$randomfile
+
+	sleep 10s
+
+	randomcheck=`/admin/swift/isls $HOSTNAME | grep $randomfile`;
+	if [ "$randomcheck" = "" ]; then
+        	echo 'Upload test failed in uploadrandom function' 2>&1 | tee -a $LOGFILE
+	else
+		ok=1;
+		echo 'Uploading works in uploadrandom function' | tee -a $LOGFILE
+		
+	fi
+
+        sleep 2s;
+        # 99% of the time we failed, but that one time where the listing didn't work lets send a delete
+        /admin/swift/isrm $HOSTNAME $randomfile
+
+}
+
+uploadrandom
+if [ "$ok" = "0" ]; then
+	echo '	Upload test failed time 1' 2>&1 | tee -a $LOGFILE
+	sleep 10s;
+
+	for uploadnumbertimes in 2 3 4 5 6 7 8 9 10; do
+		uploadrandom
+		if [ "$ok" = "0" ]; then
+			echo "	Upload test failed time ${uploadnumbertimes}" 2>&1 | tee -a $LOGFILE
+			if [ "${uploadnumbertimes}" = "10" ]; then
+				echo '	Upload test failed time 10 times emailing' 2>&1 | tee -a $LOGFILE
+				echo '	Contents of /root/.swift/.auth_key ' | tee -a $LOGFILE
+                		cat /root/.swift/.auth_key | tee -a $LOGFILE
+                		echo "tried /admin/swift/isput $HOSTNAME $PKGTMP/$randomfile Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME upload test number 2 failed" $MAILTO $MAILARGS2
+			else
+				echo "sleeping ${uploadnumbertimes} m"
+				sleep ${uploadnumbertimes}m;
+			fi
+		else
+			echo "Upload test works on number ${uploadnumbertimes}" 2>&1 | tee -a $LOGFILE
+		fi
+	done
+fi
+
+echo 'Upload was ok';
+sleep 1s;
+
+if [ "$1" = "uploadtest" ]; then
+	echo 'exit: Just doing upload test';
+	exit;
+fi
+
+echo 'Cleaning up old logs' | tee -a $LOGFILE
+
+if [ -e  /usr/sbin/tmpwatch ]; then
+	/usr/sbin/tmpwatch -a 128 /root/tmp/swift
+elif [ -e /usr/sbin/tmpreaper ]; then
+	/usr/sbin/tmpreaper -a 128 /root/tmp/swift
+else
+	echo 'No program to clean up old logs, ignoring';
+fi
+
+
+# functions
+
+function enable_backups()
+{
+	if [ -f /var/cpanel/users/$1 ]; then
+	
+		isenabledcheck=`grep ^LEGACY_BACKUP=1 /var/cpanel/users/$1`;
+		if [ "$isenabledcheck" = "" ]; then
+			/admin/replace-linux LEGACY_BACKUP=0 LEGACY_BACKUP=1 -- /var/cpanel/users/$1
+		fi
+
+		isenabledcheck2=`grep ^BACKUP=1 /var/cpanel/users/$1`;
+        	if [ "$isenabledcheck2" = "" ]; then
+               		/admin/replace-linux BACKUP=0 BACKUP=1 -- /var/cpanel/users/$1
+        	fi
+	else
+		echo "Error: did not find /var/cpanel/users/$1 in function enable_backups" 2>&1 | tee -a $LOGFILE
+ 	fi
+}
+
+function disable_backups()
+{
+        if [ -f /var/cpanel/users/$1 ]; then
+
+		echo "Disabling backups for user $1 at $LINENO";
+		if [ -f /root/.swift/$1_nodisable ]; then
+			echo "Backups not disabled due to the existance of /root/.swift/$1_nodisable";
+		else
+
+                	isdisabledcheck=`grep ^LEGACY_BACKUP=0 /var/cpanel/users/$1`;
+                	if [ "$isdisabledcheck" = "" ]; then
+				echo '	Legacy backups disabled';
+                        	/admin/replace-linux LEGACY_BACKUP=1 LEGACY_BACKUP=0 -- /var/cpanel/users/$1
+			else
+				echo '	Legacy already disabled';
+                	fi
+
+                	isdisabledcheck2=`grep ^BACKUP=0 /var/cpanel/users/$1`;
+                	if [ "$isdisabledcheck2" = "" ]; then
+				echo '	Non Legacy disabled';
+                        	/admin/replace-linux BACKUP=1 BACKUP=0 -- /var/cpanel/users/$1
+			else
+				echo '	Non Legacy already disabled';
+                	fi
+		fi
+        else
+                echo "Error: did not find /var/cpanel/users/$1 in function disable_backups" 2>&1 | tee -a $LOGFILE
+        fi
+}
+
+
+function issuspended()
+{
+	
+	shell=`cat /etc/passwd | grep ^$1: | cut -d: -f7`;
+	if [ "$shell" = "/bin/false" ]; then
+		echo "$1 is suspended (shell) at line $LINENO" 2>&1 | tee -a $LOGFILE
+		suspended=1;
+	elif [ -f /var/cpanel/suspended ]; then
+		echo "$1 is suspended (var/cpanel/suspended) at line $LINENO" 2>&1 | tee -a $LOGFILE
+		suspended=1;
+	else
+		echo "$1 is an active account" 2>&1 | tee -a $LOGFILE
+		suspended=0;
+	fi
+	
+}
+
+function checkuploaddebug()
+{
+	echo "Since upload has failed lets log what was returned" 2>&1 | tee -a $LOGFILE
+	echo "Running /admin/swift/rsync $HOSTNAME $1 --check $2" 2>&1 | tee -a $LOGFILE
+	/admin/swift/rsync $HOSTNAME $1 --check $2 2>&1 | tee -a $LOGFILE
+}
+
+function checkupload()
+{
+	echo "checking $1 md5 with $2 $3 " 2>&1 | tee -a $LOGFILE
+	#/admin/swift/rsync webhosting1700.interserver.net /backup/2015-03-25/accounts/mp311com.tar.gz --check cpmove-mp311com-2015-03-26.tar.gz
+	#/admin/swift/rsync $HOSTNAME $1 --check $2
+	# give swift some time after upload
+	sleep 20s;
+	if [ "$3" = "24" ]; then
+		check_upload=`/admin/swift/rsync $HOSTNAME $1 --check $2 24 2>/dev/null| egrep "No match found|do not match"`;
+	else
+		check_upload=`/admin/swift/rsync $HOSTNAME $1 --check $2 2>/dev/null| egrep "No match found|do not match"`;
+	fi
+
+	echo "Running /admin/swift/rsync $HOSTNAME $1 --check $2 $3 at line $LINENO" 2>&1 | tee -a $LOGFILE
+
+	if [ "$check_upload" = "" ]; then
+		uploadcheck=1;
+	else
+		uploadcheck=0;
+	fi
+
+}
+
+#legacy
+inc_backup()
+{
+        cpaneldate=`${date} +%Y-%m-%d`;
+	curdir=`pwd`;
+        dir=$1;
+        echo "Running $dir incremental legacy backup in $backupdir/cpbackup/$dir" 2>&1 | tee -a $LOGFILE
+	cd $backupdir/cpbackup/$dir
+	for user in *; do
+		cd $backupdir/cpbackup/$dir
+		echo 2>&1 | tee -a $LOGFILE
+		if [ ! -d $backupdir/cpbackup/$dir/$user ]; then
+			echo "${cyan}$backupdir/cpbackup/$dir/$user${normal} not a dir" 2>&1 | tee -a $LOGFILE
+			echo
+			continue;
+		fi
+		echo "Working on user $user" | tee -a $LOGFILE
+	  	if [ ! -f /var/cpanel/users/$user ]; then
+                        echo "Did not find ${cyan}/var/cpanel/users/$user${normal} skipping" 2>&1 | tee -a $LOGFILE
+			echo
+                        continue;
+                fi
+
+                #begin backup checks
+                issuspended $user
+                if [ "$suspended" = "1" ]; then
+                        echo "Skipping suspended ${cyan}$user ${normal}" 2>&1 | tee -a $LOGFILE
+                        echo
+                        continue;
+                fi
+
+		# need for disk space
+	        gethomedir $user
+	        if [ "$homecontinue" = "0" ]; then
+        	        echo "Skipping unknown homedir ${cyan}$user${normal}" 2>&1 | tee -a $LOGFILE
+                	echo
+                	continue;
+        	fi
+
+		if [ ! -f /root/.swift/_skipdisk ]; then
+			getdiskspace $user
+	                if [ "$1" = "diskcheck" ]; then
+	                        echo "DISK_CHECK called $user returned $diskusage and out limit is $MBLIMIT" 2>&1 | tee -a $LOGFILE
+                	fi
+
+                	if [ "$diskusage" -gt "$MBLIMIT" ]; then
+	                	echo "Skipping ${cyan} $user ${normal} as disk usage $disk usage is over limit of $MBLIMIT and backups will be disabled at $LINENO" 2>&1 | tee -a $LOGFILE
+				if [ ! "$1" = "diskcheck" ]; then
+                        		echo "Skipping $user as disk usage $disk usage is over limit of $MBLIMIT Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+				fi
+                        	echo
+				disable_backups $user
+                        	continue;
+			else
+				enable_backups $user 
+               		fi
+
+
+
+                        #get inodes
+ 	                getinodes $user
+                        # no re-enable in inode code
+                        # if the inodes reduce in the future, the diskusage check will then enable the backups
+                        if [ ! "$inodeusage" = "" ]; then
+        	                if [ "$inodeusage" -gt "$INLIMIT" ]; then
+                	                echo "DISK_CHECK: ${cyan}$user ${normal} is over the inode limit at $inodeusage and backups will be disabled at $LINENO" 2>&1 | tee -a $LOGFILE
+                                       	disable_backups $user
+					sleep 2s;
+                        	        if [ ! "$1" = "diskcheck" ]; then
+                                		echo "Skipping $user as disk usage $diskusage is over limit of $MBLIMIT Line $LINENO and backups disabled" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+                               		fi
+                                else
+        	                        echo "BACKUP CHECK: ${green}$user ${normal} inodes at $inodeusage and ok" 2>&1 | tee -a $LOGFILE
+	                        fi
+                        fi
+                        echo "" 2>&1 | tee -a $LOGFILE
+                        # end inodes
+
+			if [ "$1" = "diskcheck" ]; then
+				echo "Running in DISK_CHECK mode, backups will not be run" 2>&1 | tee -a $LOGFILE
+				echo
+				continue;
+                        fi
+
+               		# check backup size
+               		getincbackupsize $backupdir/cpbackup/$dir/$user
+               		if [ "$incdiskusage" -gt "$MBLIMIT" ]; then
+	       			echo "Skipping ${cyan}$user{normal} as diskusage $incdiskusage usage is over limit of $MBLIMIT for backup dir $backupdir/cpbackup/$dir/$user" 2>&1 | tee -a $LOGFILE
+         			echo "Skipping $user $incdiskusage is over limit of $MBLIMIT for dir $backupdir/cpbackup/$dir/$user Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+                        	echo
+                        	continue
+               		fi
+		fi
+
+		echo "Backing up ${green}$user${normal} folder $backupdir/cpbackup/$dir/$user as cpmove-$user-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
+		# move to dir to make it a restorable archive for cpanel instead of including the full path in the tar
+		cd $backupdir/cpbackup/$dir
+                /admin/swift/fly $HOSTNAME $user frombackup cpmove-$user-$extension.tar.gz
+		cd $curdir
+		echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME cpmove-$user-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
+		sleep 2s;
+                /admin/swift/deleteafter $HOSTNAME cpmove-$user-$extension.tar.gz $DELETEAFTER
+		sleep 2s;
+		echo
+	done
+
+
+}
+
+run_backup()
+{
+	cpaneldate=`${date} +%Y-%m-%d`;
+
+	dir=$1;
+	echo "Running ${green}$dir${normal} legacy backup" 2>&1 | tee -a $LOGFILE
+	#/admin/swift/mkdir_p $HOSTNAME --force
+	#cd $backupdir/cpbackup/$dir
+	# compressed
+	for file in `find $backupdir/cpbackup/$dir -maxdepth 1 -type f | grep gz$`; do
+                user=`echo $file | cut -d/ -f5 | cut -d. -f1`;
+		echo 2>&1 | tee -a $LOGFILE
+                echo "Working on user ${green}$user${normal} for $dir and file $file" 2>&1 | tee -a $LOGFILE
+
+		if [ ! -f /var/cpanel/users/$user ]; then
+			echo "Did not find ${cyan}/var/cpanel/users/$user${normal} skipping" 2>&1 | tee -a $LOGFILE
+			continue;
+		fi
+		#begin backup checks
+                issuspended $user
+                if [ "$suspended" = "1" ]; then
+                        echo "Skipping suspended ${cyan}$user ${normal}" 2>&1 | tee -a $LOGFILE
+                        echo
+                        continue;
+                fi
+
+		if [ ! -e /root/.swift/_skipdisk ]; then
+                	diskusage=`ls -l $file | awk '{print $5}'`;
+                	if [ "$diskusage" -gt "$CPLIMIT" ]; then
+
+                        	echo "Skipping ${cyan} $user ${normal} as disk usage $disk usage is over limit of $CPLIMIT" 2>&1 | tee -a $LOGFILE
+                        	echo "Skipping $user as disk usage $disk usage is over limit of $CPLIMIT Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+                        	/admin/replace-linux LEGACY_BACKUP=1 LEGACY_BACKUP=0 -- /var/cpanel/users/$user
+                        	/scripts/updateuserdomains
+                        	echo "Disabled legacy auto backups for ${cyan}$user${normal}" 2>&1 | tee -a $LOGFILE
+                        	echo "$user was too large at $diskusage Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME user $user disabled backups" $MAILTO $MAILARGS2
+                        	echo
+				sleep 2s;
+                        	continue;
+                	fi
+		fi
+		enable_backups $user
+
+		echo "" 2>&1 | tee -a $LOGFILE
+                echo "Starting backup of $user" 2>&1 | tee -a $LOGFILE
+
+                echo "Date extension is $cpaneldate" 2>&1 | tee -a $LOGFILE
+                checkupload $file cpmove-$user-$cpaneldate.tar.gz
+		echo "	DEBUG: checkupload returned: $check_upload at line $LINENO" 2>&1 | tee -a $LOGFILE
+		echo
+
+		# codeblock1 move to function
+                if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ] ; then
+                        /admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
+			sleep 5s;
+			echo "Sending deleteafter $DELETEAFTER days for ${green}$user${normal} upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
+                        /admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
+			sleep 5s;
+			
+                else
+                        echo "$user file cpmove-$user-$cpaneldate.tar.gz checksum ok, no upload needed at line $LINENO" 2>&1 | tee -a $LOGFILE
+			COUNTSKIP=`expr $COUNTSKIP + 1`
+			echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts skipped due to md5 match $COUNTSKIP" 2>&1 | tee -a $LOGFILE
+                        continue;
+			echo "done with ${green}$user${normal}" 2>&1 | tee -a $LOGFILE
+			sleep 5s;
+			echo
+                fi
+
+                checkupload $file cpmove-$user-$cpaneldate.tar.gz 24
+                if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
+                        echo "md5sum does not match for ${cyan}$user${normal}, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
+			echo "  DEBUG: checkupload returned: $check_upload";
+			echo 'Hold on here, lets double check this';
+			sleep 2s;
+			if [ -f /root/.swift/.auth_key ]; then
+				/bin/rm -v /root/.swift/.auth_key
+			fi
+			if [ `checkupload $file cpmove-$user-$cpaneldate.tar.gz 24` = "0" ]; then
+				checkuploaddebug $file cpmove-$user-$cpaneldate.tar.gz
+                        	echo "$user backup failed md5check. $uploadcheck at $LINENO (check2) Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup run failed md5" $MAILTO $MAILARGS2
+				COUNTFAILURE=`expr $COUNTFAILURE + 1`
+				echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+				echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+				echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+
+				# retry, reusing codeblock1 (move to function)
+				echo "Retrying failed upload of cpmove-$user-$cpaneldate.tar.gz (second run)" 2>&1 | tee -a $LOGFILE
+				sleep 1m;
+				/admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
+	                        sleep 5s;
+        	                echo "Sending deleteafter $DELETEAFTER days for ${green}$user${normal} upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
+                	        /admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
+                        	sleep 5s;
+
+				checkupload $file cpmove-$user-$cpaneldate.tar.gz 24
+
+				if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
+					echo "Second run of cpmove-$user-$cpaneldate.tar.gz also failed" | tee -a $LOGFILE
+					RETRYFAILURE=`expr $RETRYFAILURE + 1`
+				else
+					echo "Second run of cpmove-$user-$cpaneldate.tar.gz was a success" | tee -a $LOGFILE
+					echo "Second run of cpmove-$user-$cpaneldate.tar.gz was a succes Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup second run success" $MAILTO $MAILARGS2
+					RETRYSUCCESS=`expr $RETRYSUCCESS + 1`
+				fi
+
+				
+				echo "Total accounts retried backed up successful $RETRYSUCCESS" 2>&1 | tee -a $LOGFILE
+				echo "Total accounts retried FAILED $RETRYFAILURE" 2>&1 | tee -a $LOGFILE
+
+				
+
+			fi
+			echo 2>&1 | tee -a $LOGFILE
+			sleep 2s;
+
+                else
+                        echo "${green}$user${normal} successfully backed up" 2>&1 | tee -a $LOGFILE
+			COUNTSUCCESS=`expr $COUNTSUCCESS + 1`;
+			echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+			sleep 2s;
+                fi
+                echo 2>&1 | tee -a $LOGFILE
+        done
+}
+
+function gethomedir()
+{
+	homedir=`cat /etc/passwd | grep ^$1: | cut -d: -f6`;
+	if [ "$homedir" = "" ]; then
+		echo "${cyan}$1${normal} got blank home dir at line $LINENO" 2>&1 | tee -a $LOGFILE
+		homecontinue=0;
+	elif [ ! -e $homedir ]; then
+		echo "${cyan}$1${normal} homedir $homedir does not exist at line $LINENO" 2>&1 | tee -a $LOGFILE
+		homecontinue=0;
+	else
+		echo "${green}$1${normal} found homedir $homedir" 2>&1 | tee -a $LOGFILE
+		homecontinue=1;
+	fi
+
+}
+
+function getincbackupsize()
+{
+	if [ ! -d $1 ]; then
+		echo "$1 is not a directory at $LINENO" 2>&1 | tee -a $LOGFILE
+	else
+		incdiskusage=`nice -n 19 du -sm $1/ | awk '{print $1}'`;
+		sleep 1s;
+	fi
+}
+
+#check inodes
+function getinodes()
+{
+	# blank values
+	inodes='';
+	inodesfloat='';
+	inodeusage='';
+
+	# only support cloudlinux
+	if [ -f /etc/container/ve.cfg ]; then
+		inodes=`quota -p -u $1 | grep /dev | awk '{print $6}' | tr -d "*" | tr '\n' '+'`;
+		inodesfloat=`echo "(${inodes%?})" | bc -l`;
+		inodeusage=`echo $inodesfloat | cut -d. -f1`;
+		echo "Inode check: user $1 returned inodes $inodes float $inodesfloat and usage $inodeusage" 2>&1 >> $LOGFILE
+	fi
+}
+
+# check size
+function getdiskspace()
+{
+	# multi partitons
+	#diskusage=`quota -u $1 | grep /dev | awk '{print $2}'`;
+	# blank theese out
+	space='';
+	diskusage='';
+	diskusagefloat='';
+
+	space=`quota -u $1 | grep /dev | awk '{print $2}' | tr -d "*" | tr '\n' '+'`;
+	# openvz with out quota will return blank
+	if [ ! "$space" = "" ]; then
+		diskusagefloat=`echo "(${space%?})/1024" | bc -l`;
+		diskusage=`echo $diskusagefloat | cut -d. -f1`;
+	fi
+
+	if [ "$diskusage" = "" ]; then
+		echo "Quota for ${green}$1${normal} is blank. Falling back to slower disk usage and checking $homedir/" 2>&1 | tee -a $LOGFILE
+		#trailing / needed for symlinks
+		diskusage=`nice -n 19 du -sm $homedir/ | awk '{print $1}'`;
+		echo "${green}$user${normal} found quota $diskusage" 2>&1 | tee -a $LOGFILE
+	else
+		echo "Got quota of $1 as $diskusage" 2>&1 | tee -a $LOGFILE
+	fi
+	
+}
+
+
+
+# don't run two backups at once
+echo 'Checking for cpanelswift backup processes' 2>&1 | tee -a $LOGFILE
+
+cpbackupcheck=`ps auxw | grep splitwrapper | grep /admin/swift | awk '{print $9}'`;
+echo $cpbackupcheck;
+
+echo "check returned $cpbackupcheck";
+if [ ! "$cpbackupcheck" = "" ]; then
+	echo "Old cpanelbackup / splitwrapper process found from $cpbackupcheck" 2>&1 | tee -a $LOGFILE
+	echo "check for hung cpanel swift backup processes on $HOSTNAME Line $LINENO - ps shows date $cpbackupcheck" | /bin/mail $MAILARGS -s "$HOSTNAME timed out waiting for swift cpanel backup" $MAILTO $MAILARGS2
+	exit;
+else
+	if [ -e  /usr/sbin/tmpwatch ]; then
+        	/usr/sbin/tmpwatch -a 1 /dev/shm
+	elif [ -e /usr/sbin/tmpreaper ]; then
+        	/usr/sbin/tmpreaper -a 1 /dev/shm
+	else
+        	echo 'No program to clean up old logs, ignoring';
+	fi
+
+fi
+if [ ! "$NOBACKUPCHECK" = "1" ]; then
+	echo 'Checking for cpanel backup processes running' 2>&1 | tee -a $LOGFILE
+	mystart=0;
+	while ps axg | grep -v grep | grep -E "/usr/local/cpanel/bin/backup|/usr/local/cpanel/scripts/cpbackup|/usr/local/cpanel//bin/backup|/usr/local/cpanel//scripts/cpbackup" > /dev/null; do
+		waitdate=`date`; 
+		if [ "$mystart" = "300" ]; then
+			echo '300 checks starting backup in 10 minutes' 2>&1 | tee -a $LOGFILE
+			backup_date_check=`ps auxw | grep -v grep | grep -E "/usr/local/cpanel/bin/backup|/usr/local/cpanel/scripts/cpbackup|/usr/local/cpanel//bin/backup|/usr/local/cpanel//scripts/cpbackup"  | awk '{print $9 " " $10}'`;
+			echo "check for hung backup processes on $HOSTNAME Line $LINENO - ps shows a date of $backup_date_check" | /bin/mail $MAILARGS -s "$HOSTNAME timed out waiting for cpanel backup" $MAILTO $MAILARGS2
+			sleep 10m;
+			break;
+		fi
+		mystart=`expr $mystart + 1`
+		echo "sleeping 1 minute while backup process finishes at $waitdate times $mystart" 2>&1 | tee -a $LOGFILE
+		sleep 1m
+		done
+else
+	echo 'Skipping checking for cpanel backups due to NOBACKUPCHECK' 2>&1 | tee -a $LOGFILE
+fi
+
+echo 'Continuing with backup run' 2>&1 | tee -a $LOGFILE
+expected_total=`ls /var/cpanel/users | wc -l`;
+echo "Total files counted is ${green}$expected_total${normal} in /var/cpanel/users. This is our expected backup total" 2>&1 | tee -a $LOGFILE
+echo "" 2>&1 | tee -a $LOGFILE
+
+# check for disabled backups that should be enabled
+echo "" 2>&1 | tee -a $LOGFILE
+echo "BACKUP CHECK: Checking space of disabled backup accounts" 2>&1 | tee -a $LOGFILE
+if [ ! -f /root/.swift/_skipdisk ]; then
+	cd /var/cpanel/users
+	if [ "$2" = "all" ]; then
+		echo 'Searching for both enabled and disabled backups' 2>&1 | tee -a $LOGFILE
+		diskchecksearch='';
+	else
+		echo 'Searching for only disabled backups' 2>&1 | tee -a $LOGFILE
+		diskchecksearch='0$';
+	fi
+		for cuser in `grep -lri BACKUP=${diskchecksearch} . | cut -d/ -f2`; do
+		echo "BACKUP CHECK: Found cpanel file ${green}$cuser${normal}" 2>&1 | tee -a $LOGFILE
+                if [ -f /root/.swift/${cuser}_skipall ]; then
+                        echo "BACKUP CHECK: Found cpanel file ${green}$cuser${normal} set to never backup based on /root/.swift/${cuser}_skipall" 2>&1 | tee -a $LOGFILE
+                        continue;
+                fi
+
+		gethomedir $cuser
+		if [ "$homecontinue" = "0" ]; then
+                	echo "BACKUP CHECK: Skipping unknown homedir ${cyan}$cuser${normal}" 2>&1 | tee -a $LOGFILE
+                        echo
+                	sleep 2s;
+                	continue;
+                fi
+
+		issuspended $cuser
+                if [ "$suspended" = "1" ]; then
+                        echo "BACKUP CHECK: Skipping suspended ${cyan}$cuser ${normal}" 2>&1 | tee -a $LOGFILE
+                        echo
+			disable_backups $cuser
+                        continue;
+                fi
+
+		getdiskspace $cuser
+		
+		if [ "$diskusage" -gt "$MBLIMIT" ]; then
+			echo "BACKUP CHECK: ${cyan}$cuser ${normal} is over the space limit at $diskusage" 2>&1 | tee -a $LOGFILE
+			disable_backups $cuser
+		else
+			echo "BACKUP CHECK: ${green}$cuser${normal} is at $diskusage. Enabling future backups" 2>&1 | tee -a $LOGFILE
+			enable_backups $cuser
+		fi
+		
+		echo "" 2>&1 | tee -a $LOGFILE
+
+		#get inodes
+		getinodes $cuser
+
+		# no re-enable in inode code
+		# if the inodes reduce in the future, the diskusage check will then enable the backups
+		if [ ! "$inodeusage" = "" ]; then
+			if [ "$inodeusage" -gt "$INLIMIT" ]; then
+				echo "BACKUP CHECK: ${cyan}$cuser ${normal} is over the inode limit at $inodeusage" 2>&1 | tee -a $LOGFILE
+                        	disable_backups $cuser
+				sleep 2s;
+			else
+				echo "BACKUP CHECK: ${green}$cuser ${normal} inodes at $inodeusage and ok" 2>&1 | tee -a $LOGFILE
+			fi
+		fi
+		echo "" 2>&1 | tee -a $LOGFILE
+		# end inodes
+			
+	done
+	/scripts/updateuserdomains
+	
+else
+	echo "/root/.swift/_skipdisk exists, skipping all disk space calls" 2>&1 | tee -a $LOGFILE
+fi
+echo "BACKUP CHECK: ENDING" 2>&1 | tee -a $LOGFILE
+echo "" 2>&1 | tee -a $LOGFILE
+
+if [ "$1" = "backupcheck" ]; then
+	echo "Exiting on only backup check";
+	exit;
+fi
+
+
+
+# NEW backup here
+BACKUP_CHECK=`cat /var/cpanel/backups/config | grep BACKUPENABLE: | cut -d\' -f2`;
+if [ "$BACKUP_CHECK" = "yes" ]; then
+	echo 'cPanel backups are enabled';
+	BACKUPDIR=`cat /var/cpanel/backups/config | grep ^BACKUPDIR: | awk '{print $2}'`;
+	if [ "$BACKUPDIR" = "" ]; then
+		echo '/var/cpanel/backups/config backup dir is blank' 2>&1 | tee -a $LOGFILE
+		exit;
+	elif [ ! -d "$BACKUPDIR" ]; then
+		echo "${cyan}$BACKUPDIR${normal} is not a directory" 2>&1 | tee -a $LOGFILE
+		exit;
+	else
+		echo "Found backup dir $BACKUPDIR" 2>&1 | tee -a $LOGFILE
+	fi
+
+	# support for inremental
+	if [ `cat /var/cpanel/backups/config | grep ^BACKUPTYPE: | awk '{print $2}'` = "incremental" ]; then
+		curdir=`pwd`;
+		echo 'Found Backup (non legacy) incremental' 2>&1 | tee -a $LOGFILE
+		# $BACKUPDIR/incremental/accounts
+		# $BACKUPDIR/weekly/incremental/accounts
+		# $BACKUPDIR/monthly/incremental/accounts
+		# prefer weekly
+		if [ -d $BACKUPDIR/weekly/incremental/accounts ]; then
+			BTIME=weekly;
+		elif [ -d $BACKUPDIR/incremental/accounts ]; then
+			BTIME='';
+		elif [ -d $BACKUPDIR/monthly/incremental/accounts ]; then
+			BTIME=monthly;
+		else
+			echo 'Did not find incremental daily weekly or monthly' 2>&1 | tee -a $LOGFILE
+			echo "Did not find incremental daily weekly or monthly at $LINENO but non legacy backup type incremental was selected with version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME incremental backup not found" $MAILTO $MAILARGS2
+			exit;
+		fi
+
+		echo "TIME period: $BTIME (if blank daily)" 2>&1 | tee -a $LOGFILE
+		cd $BACKUPDIR/$BTIME/incremental/accounts
+		for dir in *; do 
+			cd $BACKUPDIR/$BTIME/incremental/accounts
+			if [ -d "$dir" ]; then
+				echo 2>&1 | tee -a $LOGFILE
+				echo "Found $dir" 2>&1 | tee -a $LOGFILE
+				user=$dir;
+				if [ -f "/var/cpanel/users/$dir" ]; then
+					issuspended $user
+					if [ "$suspended" = "1" ]; then
+			                        echo "Skipping suspended ${cyan}$user ${normal}" 2>&1 | tee -a $LOGFILE
+        	                		echo
+						sleep 2s;
+	                        		continue;
+                			fi
+
+				        # need for disk space
+				        gethomedir $user
+                			if [ "$homecontinue" = "0" ]; then
+                        			echo "Skipping unknown homedir ${cyan}$user${normal}" 2>&1 | tee -a $LOGFILE
+                        			echo
+						sleep 2s;
+                        			continue;
+                			fi
+					if [ ! -f /root/.swift/_skipdisk ]; then
+						getdiskspace $user
+						if [ "$1" = "diskcheck" ]; then
+                        				echo "DISK_CHECK $user returned $diskusage with limit $MBLIMIT" 2>&1 | tee -a $LOGFILE
+                				fi
+
+						if [ "$diskusage" -gt "$MBLIMIT" ]; then
+                					echo "Skipping ${cyan} $user ${normal} as disk usage $diskusage is over limit of $MBLIMIT and backups will be disabled at $LINENO" 2>&1 | tee -a $LOGFILE
+							if [ ! "$1" = "diskcheck" ]; then
+                						echo "Skipping $user as disk usage $diskusage is over limit of $MBLIMIT Line $LINENO and backups disabled" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+                					fi
+							echo
+							disable_backups $user
+                					continue;
+						else
+							enable_backups $user
+        					fi
+
+						#get inodes
+                				getinodes $user
+
+                				# no re-enable in inode code
+                				# if the inodes reduce in the future, the diskusage check will then enable the backups
+                				if [ ! "$inodeusage" = "" ]; then
+                        				if [ "$inodeusage" -gt "$INLIMIT" ]; then
+                                				echo "DISK_CHECK: ${cyan}$user ${normal} is over the inode limit at $inodeusage and backups will be disabled at $LINENO" 2>&1 | tee -a $LOGFILE
+                                				disable_backups $user
+								sleep 2s;
+							if [ ! "$1" = "diskcheck" ]; then
+                                				echo "Skipping $user as inode usage $inodeusage is over limit of $INLIMIT Line $LINENO and backups disabled" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+                                                        fi				
+                        				else
+                                				echo "BACKUP CHECK: ${green}$user ${normal} inodes at $inodeusage and ok" 2>&1 | tee -a $LOGFILE
+                        				fi
+                				fi
+                				echo "" 2>&1 | tee -a $LOGFILE
+                				# end inodes
+
+
+						if [ "$1" = "diskcheck" ]; then
+							echo "Running in disk check mode - no backup will run" 2>&1 | tee -a $LOGFILE
+							echo 2>&1 | tee -a $LOGFILE
+							continue;
+						fi
+
+						# check backup size
+						getincbackupsize $BACKUPDIR/$BTIME/incremental/accounts/$dir
+						if [ "$incdiskusage" -gt "$MBLIMIT" ]; then
+
+							echo "Skipping ${cyan}$user{normal} as diskusage $incdisk usage is over limit of $MBLIMIT for backup dir $BACKUPDIR/$BTIME/incremental/accounts/$dir" 2>&1 | tee -a $LOGFILE
+                              				echo "Skipping $user $incdiskusage is over limit of $MBLIMIT for dir $BACKUPDIR/$BTIME/incremental/accounts/$dir Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+							echo
+							continue
+						fi
+					fi
+
+					# start backup
+					echo "Backing up user ${green}$dir${normal} folder $BACKUPDIR/$BTIME/incremental/accounts/$dir as cpmove-$dir-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
+					cd $BACKUPDIR/$BTIME/incremental/accounts
+					/admin/swift/fly $HOSTNAME $dir frombackup cpmove-$dir-$extension.tar.gz
+					cd $curdir
+					echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME $user-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
+					sleep 2s;
+					/admin/swift/deleteafter $HOSTNAME cpmove-$dir-$extension.tar.gz $DELETEAFTER 
+					sleep 2s;
+					echo 
+				else
+					echo "skipping, did not find /var/cpanel/users/${cyan}$dir ${normal}" 2>&1 | tee -a $LOGFILE
+				fi
+			fi
+		done		
+		# no more to run
+		# mail backup log
+		echo "backup log attached" | /bin/mail $MAILARGS -s "$HOSTNAME backup completed" -a $LOGFILE $MAILTO $MAILARGS2
+		exit;
+	fi
+	# end incremental
+
+	# files to backup
+	#/backup/2015-03-25/accounts/aimaiwoa.tar.gz
+	# only supporting weekly now
+	#echo "find $BACKUPDIR/weekly -maxdepth 1 -type f | grep /accounts/ | grep tar.gz$";
+	for file in `find $BACKUPDIR/weekly -maxdepth 3 -type f | grep /accounts/ | grep tar.gz$`; do
+	
+		user=`echo $file | cut -d/ -f6 | cut -d. -f1`;
+		cpaneldate=`echo $file | cut -d/ -f4`;	
+		# compatibility
+		extension=$cpaneldate;
+		echo 2>&1 | tee -a $LOGFILE
+		echo "Found file $file for user ${green}$user${normal} for date $cpaneldate" 2>&1 | tee -a $LOGFILE
+		if [ ! -f $file ]; then
+			echo "Hit error. file ${cyan}$file{normal} is not a file" 2>&1 | tee -a $LOGFILE
+			sleep 2s;
+			continue;
+		fi
+
+		#begin backup checks
+	        issuspended $user
+	        if [ "$suspended" = "1" ]; then
+        	        echo "Skipping suspended ${cyan}$user ${normal}" 2>&1 | tee -a $LOGFILE
+			sleep 2s;
+                	echo
+                	continue;
+		fi
+		if [ ! -f /root/.swift/_skipdisk ]; then
+			diskusage=`ls -l $file | awk '{print $5}'`;
+	        	if [ "$diskusage" -gt "$CPLIMIT" ]; then
+		
+        	        	echo "Skipping ${cyan} $user ${normal} as disk usage $disk usage is over limit of $CPLIMIT" 2>&1 | tee -a $LOGFILE
+                		echo "Skipping $user as disk usage $disk usage is over limit of $CPLIMIT Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+				/admin/replace-linux BACKUP=1 BACKUP=0 -- /var/cpanel/users/$user
+				/scripts/updateuserdomains
+				echo "Disabled auto backups for $user" 2>&1 | tee -a $LOGFILE
+				sleep 2s;
+				echo "$user was too large at $diskusage Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME user $user disabled backups" $MAILTO $MAILARGS2
+                		echo
+                		continue;
+        		fi
+		fi
+		enable_backups $user
+
+	        echo "Starting backup of ${green}$user${normal}" 2>&1 | tee -a $LOGFILE
+        	echo "Date extension is $cpaneldate" 2>&1 | tee -a $LOGFILE
+		if [ "$DELETEDATE" = "$cpaneldate" ]; then
+			YESTODELETE=1;
+			echo 'DELETEDATE is set and matches. This backup will be removed after uploading' 2>&1 | tee -a $LOGFILE
+		fi
+		#No match found
+		checkupload $file cpmove-$user-$cpaneldate.tar.gz
+		echo "  DEBUG: checkupload returned $check_upload" 2>&1 | tee -a $LOGFILE
+		# codeblock2 (move to function)
+		if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
+			echo "Uploading backup for ${green}$user${normal} due to no match at line $LINENO" 2>&1 | tee -a $LOGFILE
+			sleep 1s;
+			/admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
+			sleep 5s;
+			echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
+        		/admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
+			sleep 2s;
+		else
+			echo "$user file cpmove-$user-$cpaneldate.tar.gz checksum ok, no upload needed at line $LINENO" 2>&1 | tee -a $LOGFILE
+			COUNTSKIP=`expr $COUNTSKIP + 1`
+			echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts skipped due to md5 match $COUNTSKIP" 2>&1 | tee -a $LOGFILE
+			echo 2>&1 | tee -a $LOGFILE
+			if [ "$YESTODELETE" = "1" ]; then
+				echo "Deleting $file due to DELETEDATE being set to $DELETEDATE" | tee -a $LOGFILE
+				/bin/rm -v $file | tee -a $LOGFILE
+			fi
+			continue;
+		fi
+		checkupload $file cpmove-$user-$cpaneldate.tar.gz 24
+        	if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
+                	echo "user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
+                	echo $uploadcheck;
+			checkuploaddebug $file cpmove-$user-$cpaneldate.tar.gz
+                	echo "$user backup failed md5check. $uploadcheck Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup run failed md5" $MAILTO $MAILARGS2
+			COUNTFAILURE=`expr $COUNTFAILURE + 1`
+                        echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+                        echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+                        echo "Total accounts skipped due to md5sum match $COUNTSKIP" 2>&1 | tee -a $LOGFILE
+
+			# second run
+			# codeblock2 reuse
+                        echo "Retrying cpmove-$user-$cpaneldate.tar.gz (second run) at line $LINENO" 2>&1 | tee -a $LOGFILE
+                        sleep 1m;
+                        /admin/swift/rsync $HOSTNAME $file --put cpmove-$user-$cpaneldate.tar.gz 2>&1 | tee -a $LOGFILE
+                        sleep 5s;
+                        echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME $user-$cpaneldate.tar.gz" 2>&1 | tee -a $LOGFILE
+                        /admin/swift/deleteafter $HOSTNAME cpmove-$user-$cpaneldate.tar.gz $DELETEAFTER
+                        sleep 5s;
+
+			checkupload $file cpmove-$user-$cpaneldate.tar.gz 24
+			if [ "$uploadcheck" = "0" ] || [ "$uploadcheck" = "" ]; then
+				RETRYFAILURE=`expr $RETRYFAILURE + 1`
+				echo "Second run of cpmove-$user-$cpaneldate.tar.gz failed" 2>&1 | tee -a $LOGFILE
+			else
+				RETRYSUCCESS=`expr $RETRYSUCCESS + 1`
+				echo "Second run of cpmove-$user-$cpaneldate.tar.gz was a success" 2>&1 | tee -a $LOGFILE
+				echo "second run of cpmove-$user-$cpaneldate.tar.gz was a success Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup second run success5" $MAILTO $MAILARGS2
+			
+			        if [ "$YESTODELETE" = "1" ]; then
+ 	                               echo "Deleting $file due to DELETEDATE being set to $DELETEDATE" | tee -a $LOGFILE
+        	                       /bin/rm -v $file | tee -a $LOGFILE
+                	        fi
+
+			fi
+
+			echo "Total accounts retried backed up successful $RETRYSUCCESS" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts retried FAILED $RETRYFAILURE" 2>&1 | tee -a $LOGFILE
+
+        	else
+                	echo "$user successfully backed up" 2>&1 | tee -a $LOGFILE
+			COUNTSUCCESS=`expr $COUNTSUCCESS + 1`;
+			echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+                        echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+			echo "Total accounts skipped due to md5sum match $COUNTSKIP" 2>&1 | tee -a $LOGFILE
+			if [ "$YESTODELETE" = "1" ]; then
+                                 echo "Deleting $file due to DELETEDATE being set to $DELETEDATE" | tee -a $LOGFILE
+                        	/bin/rm -v $file | tee -a $LOGFILE
+                        fi
+        	fi
+		echo 2>&1 | tee -a $LOGFILE
+	done
+
+	# ending
+	# remove old
+	echo 'Removing db of local files over 60 days old' 2>&1 | tee -a $LOGFILE
+	/admin/swift/rsync none none deleteoldsplitover60
+	# mail backup log
+	echo "backup log attached" | /bin/mail $MAILARGS -s "$HOSTNAME backup completed" -a $LOGFILE $MAILTO $MAILARGS2
+	exit;
+else
+	echo 'BACKUPS not enabled in cPanel. Checking Legacy backups.' 2>&1 | tee -a $LOGFILE
+fi
+
+# legacy backup here
+
+if [ ! -f /etc/cpbackup.conf ]; then
+	touch /etc/cpbackup.conf
+fi
+
+touch /etc/cpbackup.conf
+legacy_backup_check=`cat /etc/cpbackup.conf | grep ^BACKUPENABLE | cut -d" " -f2`;
+
+if [ "$legacy_backup_check" = "yes" ]; then
+	if [ `grep ^BACKUPTYPE /etc/cpbackup.conf | awk '{print $2}'` = "ftp" ]; then
+		echo "FTP backups are enabled no local backups to copy" 2>&1 | tee -a $LOGFILE
+	else
+		echo 'Legacy backup is enabled' 2>&1 | tee -a $LOGFILE
+		if [ `cat /etc/cpbackup.conf | grep ^BACKUPINC | awk '{print $2}'` = "yes" ]; then
+			echo "Legacy Incremental backup in use" 2>&1 | tee -a $LOGFILE
+			backupdir=`grep ^BACKUPDIR /etc/cpbackup.conf | cut -d" " -f2`;
+			echo "Found backup dir $backupdir" 2>&1 | tee -a $LOGFILE
+                
+			if [ -d $backupdir ]; then
+                        	daily=`grep ^BACKUPRETDAILY /etc/cpbackup.conf | cut -d" " -f2`;
+                        	weekly=`grep ^BACKUPRETWEEKLY /etc/cpbackup.conf | cut -d" " -f2`;
+                        	monthly=`grep ^BACKUPRETMONTHLY /etc/cpbackup.conf | cut -d" " -f2`;
+
+                        	echo "Found backupdir: $backupdir daily: $daily weekly: $weekly monthly: $monthly" 2>&1 | tee -a $LOGFILE
+                        	if [ "$daily" = "1" ]; then
+                                	inc_backup daily
+                        	fi
+
+                        	if [ "$weekly" = "1" ]; then
+                                	inc_backup weekly
+                        	fi
+
+                        	if [ "$monthly" = "1" ]; then
+                                	inc_backup monthly
+                        	fi
+
+                	else
+                        	echo "error $backupdir is not a directory" 2>&1 | tee -a $LOGFILE
+                	fi
+
+                	# done
+			# mail backup log
+			echo "backup log attached" | /bin/mail $MAILARGS -s "$HOSTNAME backup completed" -a $LOGFILE $MAILTO $MAILARGS2
+                	exit;
+		else
+			backupdir=`grep ^BACKUPDIR /etc/cpbackup.conf | cut -d" " -f2`;
+			echo "Found backup dir $backupdir" 2>&1 | tee -a $LOGFILE
+			if [ -d $backupdir ]; then
+				daily=`grep ^BACKUPRETDAILY /etc/cpbackup.conf | cut -d" " -f2`;
+		       		weekly=`grep ^BACKUPRETWEEKLY /etc/cpbackup.conf | cut -d" " -f2`;
+        			monthly=`grep ^BACKUPRETMONTHLY /etc/cpbackup.conf | cut -d" " -f2`;
+		        
+				echo "Found backupdir: $backupdir daily: $daily weekly: $weekly monthly: $monthly" 2>&1 | tee -a $LOGFILE
+				if [ "$daily" = "1" ]; then
+		                	run_backup daily
+        			fi
+
+        			if [ "$weekly" = "1" ]; then
+                			run_backup weekly
+        			fi
+
+        			if [ "$monthly" = "1" ]; then
+                			run_backup monthly
+        			fi
+
+			else
+				echo "error $backupdir is not a directory" 2>&1 | tee -a $LOGFILE
+			fi
+			# done
+			# mail backup log
+                        echo "backup log attached" | /bin/mail $MAILARGS -s "$HOSTNAME backup completed" -a $LOGFILE $MAILTO $MAILARGS2
+			exit;	
+		fi
+	fi
+fi
+
+echo 'Legacy backups not enabled' 2>&1 | tee -a $LOGFILE
+
+# backup when cpanel backups are not enabled
+if [ ! -e /root/.swift/_enablecpanelswift ]; then
+	echo 'touch /root/.swift/_enablecpanelswift to enable backups outside of cpabackup to swift' 2>&1 | tee -a $LOGFILE
+	exit;
+fi
+
+#get all users
+cpaneldate=`${date} +%Y-%m-%d`;
+
+cd /var/cpanel/users
+for user in *; do
+	echo "" 2>&1 | tee -a $LOGFILE
+	echo "Found user ${green}$user${normal} to backup" 2>&1 | tee -a $LOGFILE
+
+	if [ -e /admin/.info/backupskip_$user ]; then
+		echo "Skipping suspended ${cyan}$user ${normal} because /admin/.info/backupskip_$user exists" 2>&1 | tee -a $LOGFILE
+	fi
+
+	issuspended $user
+	if [ "$suspended" = "1" ]; then
+		echo "Skipping suspended ${cyan}$user ${normal}" 2>&1 | tee -a $LOGFILE
+		echo
+		continue;
+	fi
+
+	gethomedir $user
+	if [ "$homecontinue" = "0" ]; then
+		echo "Skipping unknown homedir ${cyan}$user${normal}" 2>&1 | tee -a $LOGFILE
+		echo
+		continue;
+	fi
+	if [ ! -f /root/.swift/_skipdisk ]; then
+		getdiskspace $user
+                if [ "$1" = "diskcheck" ]; then
+                        echo "DISK_CHECK $user returned $diskusage with limit $MBLIMIT" 2>&1 | tee -a $LOGFILE
+                fi
+
+		if [ "$diskusage" -gt "$MBLIMIT" ]; then
+			echo "Skipping ${cyan} $user ${normal} as disk usage $disk usage is over limit of $MBLIMIT" 2>&1 | tee -a $LOGFILE
+			if [ ! "$1" = "diskcheck" ]; then
+				echo "Skipping $user as disk usage $disk usage is over limit of $MBLIMIT Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+			fi
+			echo
+			disable_backups $user
+			continue;
+		else
+			enable_backups $user
+		fi
+
+                #get inodes
+                getinodes $user
+                # no re-enable in inode code
+                # if the inodes reduce in the future, the diskusage check will then enable the backups
+                if [ ! "$inodeusage" = "" ]; then
+	                if [ "$inodeusage" -gt "$INLIMIT" ]; then
+        	                echo "DISK_CHECK: ${cyan}$user ${normal} is over the inode limit at $inodeusage and backups will be disabled at $LINENO" 2>&1 | tee -a $LOGFILE
+                                disable_backups $user
+				sleep 2s;
+                                if [ ! "$1" = "diskcheck" ]; then
+                	                echo "Skipping $user as inode usage $inodeusage is over limit of $INLIMIT Line $LINENO and backups disabled" | /bin/mail $MAILARGS -s "$HOSTNAME skipped user $user in swift backup run" $MAILTO $MAILARGS2
+                                fi
+                        else
+                                echo "BACKUP CHECK: ${green}$user ${normal} inodes at $inodeusage and ok" 2>&1 | tee -a $LOGFILE
+                	fi
+ 	        fi
+                echo "" 2>&1 | tee -a $LOGFILE
+                # end inodes
+
+
+		if [ "$1" = "diskcheck" ]; then
+			echo "Running in disk check mode - no backup will run" 2>&1 | tee -a $LOGFILE
+			echo 2>&1 | tee -a $LOGFILE
+			continue;
+		fi
+	fi
+	
+	echo "Starting backup of $user" 2>&1 | tee -a $LOGFILE
+	echo "Date extension is $extension" 2>&1 | tee -a $LOGFILE
+	/scripts/pkgacct $user $PKGTMP
+	if [ -d "$PKGTMP/cpmove-$user.tar.gz" ]; then
+		echo "$PKGTMP/cpmove-$user.tar.gz does not exist, the backup has failed" 2>&1 | tee -a $LOGFILE
+		echo "file $PKGTMP/cpmove-$user.tar.gz does not exist Line $LINENO" | /bin/mail $MAILARGS -s "$HOSTNAME backup failed for $user" $MAILTO $MAILARGS2
+		continue;
+	else
+		echo "$PKGTMP/cpmove-$user.tar.gz exists" 2>&1 | tee -a $LOGFILE
+	fi
+	/admin/swift/rsync $HOSTNAME $PKGTMP/cpmove-$user.tar.gz --put cpmove-$user-$extension.tar.gz 2>&1 | tee -a $LOGFILE
+	sleep 5s;
+	echo "Sending deleteafter $DELETEAFTER days for $user upload $HOSTNAME cpmove-$user-$extension.tar.gz" 2>&1 | tee -a $LOGFILE
+	/admin/swift/deleteafter $HOSTNAME cpmove-$user-$extension.tar.gz  $DELETEAFTER
+	sleep 2s;
+
+	#check md5sum
+	uploadcheck=`/admin/swift/rsync $HOSTNAME $PKGTMP/cpmove-$user.tar.gz --check cpmove-$user-$extension.tar.gz 24 2>/dev/null| egrep "No match found|do not match"`;
+	if [ ! "$uploadcheck" = "" ]; then
+		echo "user ${cyan}$user${normal} md5sum does not match, we have an error at line $LINENO" 2>&1 | tee -a $LOGFILE
+		echo $uploadcheck;
+		checkuploaddebug $file cpmove-$user-$cpaneldate.tar.gz
+		echo "$user backup failed md5check. $uploadcheck Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup run failed md5" $MAILTO $MAILARGS2
+		COUNTFAILURE=`expr $COUNTFAILURE + 1`
+                echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+		echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+                echo "Total accounts skipped due to md5sum match $COUNTSKIP" 2>&1 | tee -a $LOGFILE
+
+		echo "Doing second run of uploading $PKGTMP/cpmove-$user.tar.gz" 2>&1 | tee -a $LOGFILE
+		sleep 1m;
+		/admin/swift/rsync $HOSTNAME $PKGTMP/cpmove-$user.tar.gz --put cpmove-$user-$extension.tar.gz 2>&1 | tee -a $LOGFILE
+		sleep 5s;
+		/admin/swift/deleteafter $HOSTNAME cpmove-$user-$extension.tar.gz  $DELETEAFTER
+		sleep 5s;
+		uploadcheck=`/admin/swift/rsync $HOSTNAME $PKGTMP/cpmove-$user.tar.gz --check cpmove-$user-$extension.tar.gz 24 2>/dev/null| egrep "No match found|do not match"`;
+		if [ ! "$uploadcheck" = "" ]; then
+			RETRYFAILURE=`expr $RETRYFAILURE + 1`
+			echo "Second run of cpmove-$user-$extension.tar.gz upload failed" 2>&1 | tee -a $LOGFILE
+		else
+			RETRYSUCCESS=`expr $RETRYSUCCESS + 1`
+			echo "Second run of cpmove-$user-$extension.tar.gz upload success" 2>&1 | tee -a $LOGFILE
+			echo "Second run of cpmove-$user-$extension.tar.gz was a success $uploadcheck Line $LINENO version $MYVERSION" | /bin/mail $MAILARGS -s "$HOSTNAME user $user in swift backup was a success" $MAILTO $MAILARGS2
+		fi
+
+		echo "Total accounts retried backed up successful $RETRYSUCCESS" 2>&1 | tee -a $LOGFILE
+		echo "Total accounts retried FAILED $RETRYFAILURE" 2>&1 | tee -a $LOGFILE
+
+	else
+		echo "$user successfully backed up" 2>&1 | tee -a $LOGFILE
+		COUNTSUCCESS=`expr $COUNTSUCCESS + 1`;
+                echo "Total accounts backed up $COUNTSUCCESS" 2>&1 | tee -a $LOGFILE
+		echo "Total accounts FAILED backup $COUNTFAILURE" 2>&1 | tee -a $LOGFILE
+		echo "Total accounts skipped due to md5sum match $COUNTSKIP" 2>&1 | tee -a $LOGFILE
+	fi
+
+	/bin/rm -v $PKGTMP/cpmove-$user.tar.gz
+	
+	echo 2>&1 | tee -a $LOGFILE
+
+done
+# mail backup log
+echo "backup log attached" | /bin/mail $MAILARGS -s "$HOSTNAME backup completed" -a $LOGFILE $MAILTO $MAILARGS2
