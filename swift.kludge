@@ -1,0 +1,86 @@
+# email settings stored here
+if [ -f /root/cpaneldirect/swift.email ]; then
+	. /root/cpaneldirect/swift.email
+fi
+
+# freebsd
+if [ -e /etc/master.passwd ]; then
+        if [ ! -e /usr/local/bin/gstat -a ! -e /usr/local/bin/gnustat ]; then
+                echo "FreeBSD detected, install coreutils misc/findutils databases/sqlite3 and curl";
+                exit;
+        fi
+        if [ -f /usr/local/bin/gstat ]; then
+                stat="/usr/local/bin/gstat";
+        elif [ -e /usr/local/bin/gnustat ]; then
+                stat="/usr/local/bin/gnustat";
+        else
+                echo "Can not find coreutils / stat at $LINENO";
+                exit;
+        fi
+
+        md5prog="/sbin/md5";
+        curl="/usr/local/bin/curl";
+        sqlite="/usr/local/bin/sqlite3";
+        splitprog="/usr/local/bin/gsplit";
+        gzip="/usr/bin/gzip";
+        tar="/usr/bin/tar";
+
+
+fi
+
+
+# curl
+# -v is *NOT* needed , -i would be better than for headers anyways, i kept -v on the lines that need it
+# test with out -v further remove progress-bar unless debug mode is on
+if [ "$ignoressl" = "1" ]; then
+        # progress bar fills up log files
+        if [ "$RUN_BY_CRON" = "1" ]; then
+                #echo 'RUN_BY_CRON is true no progress bar will be shown';
+                CURLOPTS=" -k --limit-rate ${RATE}";
+        else
+                CURLOPTS=" -k --progress-bar --limit-rate ${RATE}";
+        fi
+else
+        CURLOPTS=" --progress-bar --limit-rate ${RATE}";
+fi
+
+# os specific centos5 is not eol and can be removed soon
+if [ -e /etc/debian_version ]; then
+        if [ ! -x /usr/bin/sqlite3 ]; then
+                echo 'Installing sqlite3';
+                apt-get -y install sqlite3
+        fi
+fi
+
+# centos5 is finally EOL, we can remote this soon
+if [ -d /usr/share/doc/centos-release-5 -o `uname -r | cut -d- -f1` = "2.6.18" ]; then
+        splitprog="$my_path/include/split5";
+fi
+
+# for backup system (interserver specific)
+if [ -x /opt/curl/bin/curl ]; then
+        if [ -d /usr/share/doc/centos-release-5 -o `uname -r | cut -d- -f1` = "2.6.18" ]; then
+                curl="/opt/curl/bin/curl";
+        fi
+fi
+
+# we can test for pigz in standard locations
+if [ -x "$my_path/include/pigz" ]; then
+        arch=`uname -m`;
+        if [ "$arch" = "x86_64" ]; then
+                #echo "Using new split and pigz";
+                #splitprog="/root/cpaneldirect/split";
+                gzip="$my_path/include/pigz";
+        fi
+fi
+
+
+function send_email_error()
+{
+	#export ERROR_NOTICE='What is in the email';
+	#export ERROR_SUBJECT='subject';
+	#export HOSTNAME=`hostname`;
+	echo "${ERROR_NOTICE}" | ${MAILX_PATH} -s "${ERROR_SUBJECT} ${HOSTNAME}" -S smtp=${smtpserver} -S smtp-auth=login -S smtp-auth-user=${smtplogin} -S smtp-auth-password=${smtppassword} -S from="${smtpfrom}" -S ssl-verify=ignore -S nss-config-dir=/etc/pki/nssdb $errorsto
+	#echo "Error email sent content ${ERROR_NOTICE} subject ${ERROR_SUBJECT} {HOSTNAME} smtpserver ${smtpserver} login ${smtplogin} from ${smtpfrom} to $errorsto";
+
+}

@@ -1,0 +1,41 @@
+# enable / disable debugging
+debug=0;
+
+# where this script is located
+my_path=/admin/swift;
+
+if [ -x /bin/mailx ]; then
+	MAILX_PATH="/bin/mailx";
+elif [ -x /usr/bin/mailx ]; then
+	MAILX_PATH="/usr/bin/mailx";
+else
+	echo '!! MAILX could not be found !!';
+fi
+
+curl="/usr/bin/curl";
+md5prog="/usr/bin/md5sum";
+FILECOMMAND="/usr/bin/file";
+db="/root/.swift/sqlite.db";
+bc='/usr/bin/bc';
+stat="/usr/bin/stat";
+gzip="/bin/gzip";
+tar="/bin/tar";
+hostprog="/bin/hostname"
+splitprog="/admin/swift/include/split";
+DDPROG="/bin/dd";
+sqlite="/usr/bin/sqlite3";
+TMP_PATH=/root/tmp;
+# this is not the path to partclone itself, we use this to call /usr/sbin/partclone.info and /usr/sbin/partclone.filesystem
+partclone_path="/usr/sbin/partclone";
+
+# bw rate limit per second in curl
+RATE=8M;
+#ignore ssl  (curl -k)
+ignoressl=1;
+
+
+#smtpserver=;
+#smtppassword=;
+#smtpfrom=;
+#smtplogin=;
+errorsto=youremail@domain.nonexistant;
